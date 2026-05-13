@@ -1,0 +1,6 @@
+*.step
+*.STEP
+*.FCStd
+*.FCStd*
+*.ttf
+__pycache__
