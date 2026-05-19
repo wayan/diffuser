@@ -21,4 +21,3 @@ def bez(poles):
     return curve
 
 
-

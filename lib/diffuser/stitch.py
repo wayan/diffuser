@@ -21,11 +21,11 @@ def Stitch(e, sfc, P):
         return e.Curve.parameterAtDistance(l, e.FirstParameter) 
 
     tab_width = (e.Length-2*P.tabIndent)/(2*P.numTabs-1)
-    space_width = tab_width
+    # tabs and spaces are equal width
     minlen = 3
 
     def tab_start(t):
-        return P.tabIndent + t*(tab_width + space_width) 
+        return P.tabIndent + t * 2 * tab_width
 
     def pt2d(l, depth):
         u = at_dist(l)
@@ -78,13 +78,13 @@ def Stitch(e, sfc, P):
         return Part.Face(sfc, wire)
 
     def slots():
-        return [ slot(t) for t in range(0, P.numTabs) ]
+        return [ slot(t) for t in range(P.numTabs) ]
 
     def tabs():
-        return [ tab(t) for t in range(0, P.numTabs)  ]
+        return [ tab(t) for t in range(P.numTabs) ]
 
     def stopper_tabs():
-        return [ stopper_tab(t) for t in range(0, P.numTabs) ]
+        return [ stopper_tab(t) for t in range(P.numTabs) ]
 
     Stitch = namedtuple('Stitch', ['slots', 'tabs', 'stopper_tabs'])
 

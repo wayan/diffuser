@@ -1,21 +1,21 @@
 import FreeCAD, Part, Mesh, MeshPart, math
 
 import BOPTools.SplitAPI
-import itertools
 
-# Importing specific items from Diffutil globally since they seem to be utility constants/functions
 from dataclasses import dataclass, field
-from functools import cached_property # <<< ADDED cached_property
-from collections import namedtuple
+from functools import cached_property
 
 import diffuser.util as du
 import diffuser.tabs as dt
 from diffuser.util import vec, X, Y, Z, O
 import diffuser.stitch as st 
 
-Vector2d = FreeCAD.Base.Vector2d
+import typing
 
-# constants
+class BibData(typing.NamedTuple):
+    Bib: typing.Any
+    Mount: typing.Any
+
 def rotateUntil(shp, angles):
     c = shp.CenterOfGravity
     minAngle = None
@@ -36,7 +36,6 @@ def rotateUntil(shp, angles):
     return shp
 
 
-# --- Utility Functions (Kept as is) ---
 def findEllipseParams(ptTop, ptBottom, aspectRatio):
     # closest ratio A/B
     z0 = ptTop.z 
@@ -62,17 +61,14 @@ def findEllipseParams(ptTop, ptBottom, aspectRatio):
     return zCenter, a, b
 
 
-
 @dataclass
 class Params:
     """Data-only class to hold diffuser parameters."""
-    # diffuserConeAngle: float = 30
     diffuserConeAngle: float = 32
 
     lensDepth: float = 37
     ellipseRatio: float = 4/3
-    #lensDia: float = 69
-    lensDia: float = 70.5 
+    lensDia: float = 70.5
     flashHeadHeight: float = 33
     flashHeadWidth: float = 64
     flashHeadDepth: float = 40
@@ -80,18 +76,19 @@ class Params:
     flashHeadSpaceUp: float = 8
     focalPlaneShift: float = 10
     diffThickness: float = 0.7
-    coverThickness: float = 1
     SensorWidth: float = 17.3
     SensorHeight: float = 13.0
     lensFocal: float = 14
     coverFrontMargin: float = 8
     coverFoldWidth: float = 14
     snapThickness: float = 5
+
+    snapHoleDia: float = 1
+
     coneTipShift: float = 290
     bottomTabWidth: float = 25
     bottomTabStart: float = 59
     tabCutWidth: float = 2.5
-   # coverSplitAt: float = 0.55
     coverSplitAt: float = 0.5415
     preventTearRadius: float = 0.3
 
@@ -101,7 +98,6 @@ class Params:
     diffuserInnerTabDepth: float = 15
 
     coverConnectedByTabs: bool = False
-    coverNumTabs: int = 3
 
     # calculated fields
     topHeight: float = field(init=False)
@@ -121,6 +117,8 @@ class Params:
     bottomStitchShift: float = 8
     bottomStitchTabHeight: float = 10
     bottomCutShallow: bool = False
+
+    bibConeAngle: float = 35
     skipMiddleTab: bool = False
 
     def __post_init__(self):
@@ -142,13 +140,11 @@ class Model:
     """
 
     def __init__(self, doc, P):
-        """Initializes the model by creating a parameter object."""
         self.doc = doc
         self.P = P
 
     @cached_property
     def bottomPoint(self):
-        # Point definitions
         return self.P.lensDia/2*Z - 5*Y
 
     @cached_property
@@ -197,38 +193,148 @@ class Model:
         pt1 = self.flashPoint
         return Part.makePlane(s, s, pt0, X.cross(pt1-pt0)).translate(-s/2*X + (pt1-pt0))
 
-    @cached_property
-    def _coneParams(self):
-        """Builds the conical shape."""
+    def _buildConeParams(self):
+        """Builds the conical shape and caches Cone, coneTip, and coneAxis together."""
         pt0 = self.PtDiffuserTop
         pt1 = self.PtDiffuserBottom
 
-        # du.angleVec, -Y, -Z are assumed to be available
         ptTip = pt0 + self.P.coneTipShift * du.angleVec(self.P.diffuserConeAngle, -Y, -Z)
+        axis  = du.circumcenter(*[(p - ptTip).normalize() for p in [pt0, pt1, du.symX(pt1)]])
 
-        # Uses the circumcenter method
-        axis = du.circumcenter(*[ (p-ptTip).normalize() for p in [pt0, pt1, du.symX(pt1) ]])
+        A     = pt0 - ptTip
+        B     = axis
+        vDown = 2 * (A.dot(B) / B.dot(B)) * B - A
+        cone  = Part.makeLine(ptTip, ptTip + vDown.normalize() * 600).revolve(ptTip, axis, 360)
 
-        A = (pt0-ptTip)
-        B = axis
-        vDown = 2 * (A.dot(B)/B.dot(B)) * B - A
-
-        depth = 600
-        cone = Part.makeLine(ptTip, ptTip + vDown.normalize() * depth).revolve(ptTip, axis, 360)
-
-        return cone, ptTip, axis
+        self.__dict__['Cone']     = cone
+        self.__dict__['coneTip']  = ptTip
+        self.__dict__['coneAxis'] = axis
 
     @cached_property
     def Cone(self):
-        return self._coneParams[0]
+        self._buildConeParams()
+        return self.__dict__['Cone']
 
     @cached_property
     def coneTip(self):
-        return self._coneParams[1]
+        self._buildConeParams()
+        return self.__dict__['coneTip']
 
     @cached_property
-    def coneAxis(self): 
-        return self._coneParams[2]
+    def coneAxis(self):
+        self._buildConeParams()
+        return self.__dict__['coneAxis']
+
+    @cached_property
+    def BottomCenterPoint(self):
+        z = -self.P.lensDia/2 - 25
+        points, lines = self.BottomPlane.Surface.intersect( Part.Line(-100*Y+z*Z,100*Y+z*Z)) 
+        return vec(points[0].X, points[0].Y, points[0].Z)
+
+    # bottom cone
+    def _buildBibConeParams(self):
+        """Builds the conical shape and caches Cone, coneTip, and coneAxis together."""
+        pt1 = self.BibLeftPoint
+        pt0 = self.BibCenterPoint
+
+        bibConeTipShift = 100
+        ptTip = pt0 + bibConeTipShift * du.angleVec(self.P.bibConeAngle, -Y, Z)
+        axis  = du.circumcenter(*[(p - ptTip).normalize() for p in [pt0, pt1, du.symX(pt1)]])
+
+        A     = pt0 - ptTip
+        B     = axis
+        vDown = 2 * (A.dot(B) / B.dot(B)) * B - A
+        cone  = Part.makeLine(ptTip, ptTip + vDown.normalize() * 600).revolve(ptTip, axis, 360)
+
+        self.__dict__['BibCone']     = cone
+        self.__dict__['bibConeTip']  = ptTip
+        self.__dict__['bibConeAxis'] = axis
+
+    @cached_property
+    def BottomLeftPoint(self):
+        ll, _ = self.BottomSideLines
+        return ll[1]
+
+    @cached_property
+    def BibLeftPoint(self):
+        pt = - (10 + self.P.lensDia/2) * X 
+        points, lines = self.BottomPlane.Surface.intersect( Part.Line(pt -100*Y, pt + 100*Y)) 
+        return vec(points[0].X, points[0].Y, points[0].Z)
+
+        return self.BottomLeftPoint
+
+    @cached_property
+    def BibCenterPoint(self):
+        pt = -(10 + self.P.lensDia/2) * Z  
+        points, lines = self.BottomPlane.Surface.intersect( Part.Line(pt -100*Y, pt + 100*Y)) 
+        return vec(points[0].X, points[0].Y, points[0].Z)
+        return self.BottomCenterPoint
+
+    @cached_property
+    def BottomEdge(self):
+        pt0 = self.BottomLeftPoint
+        pt2 = du.symX(pt0)
+        pt1 = self.BottomCenterPoint
+
+        # Step 1 — intersect the two surfaces at shape level
+        # (assuming you have Face objects for both)
+        section = self.BibCone.section(self.BottomPlane)
+        edges = section.Edges   # list of intersection curve edges
+
+        # Step 2 — find the edge that passes through pt1
+        target_edge = next(e for e in edges if du.point_on_edge(pt1, e))
+
+        # Step 3 — trim to [pt0, pt2] along that edge
+        curve = target_edge.Curve
+
+        u0 = curve.parameter(pt0)
+        u2 = curve.parameter(pt2)
+
+        return Part.Edge(curve, u0, u2)
+
+    @cached_property
+    def BibEdge(self):
+        pt0 = self.BibLeftPoint
+        pt2 = du.symX(pt0)
+        pt1 = self.BibCenterPoint
+
+        print("X", pt0, pt1, pt2)
+
+        # Step 1 — intersect the two surfaces at shape level
+        # (assuming you have Face objects for both)
+        section = self.BibCone.section(self.BottomPlane)
+        edges = section.Edges   # list of intersection curve edges
+
+        print("edges", len(edges) )
+
+        # Step 2 — find the edge that passes through pt1
+        edges = [ e for e in edges if du.point_on_edge(pt1, e) ]
+
+        print("edges", len(edges) )
+        target_edge = edges[0]
+
+        # Step 3 — trim to [pt0, pt2] along that edge
+        curve = target_edge.Curve
+
+        u0 = curve.parameter(pt0)
+        u2 = curve.parameter(pt2)
+
+        return Part.Edge(curve, u0, u2)
+
+    @cached_property
+    def BibCone(self):
+        self._buildBibConeParams()
+        return self.__dict__['BibCone']
+
+    @cached_property
+    def bibConeTip(self):
+        self._buildBibConeParams()
+        return self.__dict__['bibConeTip']
+
+    @cached_property
+    def bibConeAxis(self):
+        self._buildBibConeParams()
+        return self.__dict__['bibConeAxis']
 
     @cached_property
     def frontEllipse(self):
@@ -239,37 +345,14 @@ class Model:
         return e
 
     @cached_property
-    def ConeLimiterEllipse(self):
-        """Builds the elliptical cut volume."""
-        d = 500
-        return Part.Face(Part.Wire(self.frontEllipse.toShape())).translate(-100*Y).extrude(d*Y)
-
-    @cached_property
     def ConeLimiterSideCurve(self):
         sc = self.sideCurve()
-        pt0 = sc.valueAt(sc.FirstParameter)
-        pt1 = sc.valueAt(sc.LastParameter)
+        pt0, pt1 = [ sc.valueAt(p) for p in sc.ParameterRange ]
         y   = -300*Y
         f   = Part.Face(Part.Wire([ Part.makeLine(y + pt0.z*Z, pt0), sc, Part.makeLine(pt1, y + pt1.z*Z), Part.makeLine(y + pt1.z*Z, y + pt0.z*Z)  ]))
         ext = 600*X
         return du.thicken(f, ext)
 
-    @cached_property
-    def FrontRimEllipse(self):
-        e = self.frontEllipse
-        pt = (1*self.PtDiffuserBottom).scale(1,0,1)
-        p0 = e.parameter(pt)
-        p1 = e.parameter(du.symX(pt))
-        arc =  Part.ArcOfEllipse(e, p1, p0)
-
-        shp = arc.toShape()
-        shp.reverse()
-        shp.translate(300*Y)
-        proj = self.Cone.makeParallelProjection(shp, -Y)
-        e = proj.SubShapes[0].Edges[0]
-        e.reverse()
-        pts = e.discretize(50)
-        return Part.BSplineCurve(pts[::-1]).toShape()
 
     @cached_property
     def FrontRim(self):
@@ -307,24 +390,18 @@ class Model:
         pt0 = self.PtDiffuserTop
         pt1 = (1*self.PtDiffuserBottom).scale(0,1,1)
         # top front of the diffuser
-        vec = du.angleVec(self.P.diffuserConeAngle, Y, Z)
-        ptFront = pt0 + (self.P.frontHeight - pt0.z)/vec.z * vec
-
-        # simple curve
-        if False:
-            pts = [pt1, pt1.z * Z + ptFront.y * Y , ptFront, ptFront + 200 *Z ]
+        cone_dir = du.angleVec(self.P.diffuserConeAngle, Y, Z)
+        ptFront = pt0 + (self.P.frontHeight - pt0.z)/cone_dir.z * cone_dir
 
         # curve going slightly down
         down = self.P.lensDia / 3
         pt1d = pt1 - down*Z
         ptfd = ptFront.y*Y + pt1d.z*Z
-        # pts = [pt1, *du.lerp_list(pt1d,ptfd,[0.3,0.7]), du.lerp(ptfd,ptFront,0.6), ptFront, ptFront + 200 *Z ]
-        return [pt1, 
-                *du.lerp_list(pt1d,ptfd,[0.3,0.7]), 
-                du.lerp(ptfd,ptFront,0.48), 
-                #          du.lerp(ptfd,ptFront,0.55), 
-                du.lerp(ptfd, ptFront, 0.72)-50*Y, 
-                du.lerp(ptfd,ptFront,0.9), 
+        return [pt1,
+                *du.lerp_list(pt1d,ptfd,[0.3,0.7]),
+                du.lerp(ptfd,ptFront,0.48),
+                du.lerp(ptfd, ptFront, 0.72)-50*Y,
+                du.lerp(ptfd,ptFront,0.9),
                 ptFront, ptFront + 200 *Z ]
 
     @cached_property
@@ -396,6 +473,104 @@ class Model:
         return dt.tabFaceCurved(e, self.Cone.Surface, depths)
 
     @cached_property
+    def Bib(self):
+        return self.bib.Bib
+
+    @cached_property
+    def BibMount(self):
+        return self.bib.Mount
+
+    @cached_property 
+    def bib(self):
+        e = self.BibEdge
+        pl, pr = e.ParameterRange
+
+        pt0, pt1 = [ e.valueAt(p) for p in (pl,pr) ]
+
+        y1, y2 = 80, 120
+        x1 = 40
+        pts = [pt1, pt1+y1*Y + x1*X, pt1+y2*Y+x1*X, pt0+y2*Y-x1*X, pt0+y1*Y-x1*X, pt0 ]
+
+        vz = 200*Z
+        ps = []
+
+        sfcBib = self.BibCone.Surface
+        for pt in pts:
+            line = Part.makeLine(pt-vz, pt+vz).Curve
+            points, _ = sfcBib.intersect(line)
+            ptsInt = [ vec(pt.X, pt.Y, pt.Z) for pt in points ]
+            ptsInt.sort(key=lambda pt:pt.z)
+            ps.append( sfcBib.parameter(ptsInt[0]) )
+
+        seg = du.bez2d(ps)
+        w = Part.Wire([e, seg.toShape(sfcBib) ])
+
+        Part.show(w, "w")
+        f =  Part.Face(sfcBib, w.reversed())
+        f.validate()
+        f.check()
+
+        bib = f
+
+        axis = self.BottomPlane.Surface.Axis
+
+        # flap
+        fw = 12 
+        fh = 20
+        ch = 12
+
+        # parameters on edge
+        odsazeni = 10
+        distances = (odsazeni, fw+odsazeni, (e.Length-fw)/2, (e.Length+fw)/2, e.Length-fw-odsazeni, e.Length-odsazeni)
+        p0, p1, p2, p3, p4, pn = ( e.Curve.parameterAtDistance(d, pl) for d in distances)
+        pm = (pl+pr)/2
+
+        ptl, ptr, ptm, pt1, pt2, pt3, pt4 = ( e.valueAt(p) for p in (pl, pr, pm, p1, p2, p3, p4) )
+
+
+        # mount plate
+        pt  = ptm + (fh+3)*X.cross(axis)
+        pts = [ ptl, ptl-20*X, vec(ptl.x-20, pt.y, pt.z) ]
+        pts += map(du.symX, reversed(pts))
+
+        curved_edges = []
+        params = (pl,p0,p1,p2,p3,p4,pn,pr)
+        for ps in zip(params, params[1:]):
+            edge = Part.makeLine(*[ e.valueAt(p) for p in ps]) if len(curved_edges) % 2 == 1 else Part.Edge(e.Curve, *ps) 
+            curved_edges.append(edge)
+
+        w = Part.Wire([ *curved_edges, *Part.makePolygon(pts[::-1]).Edges ])
+        mount = Part.Face(w)
+        Part.show(w, "ww")
+
+        # flaps to connect the bib to mount plate
+        for pa, pb in ((p2,p3), (p0,p1), (p4,pn)):
+            pm = (pa+pb)/2
+            normal = sfcBib.normal(*sfcBib.parameter(e.valueAt(pm)))
+            v = normal.cross(-e.tangentAt(pm))
+
+            pta, ptb   = ( e.valueAt(p) for p in (pa, pb) )
+            pta2, ptb2 = (pt + fh *v    for pt in (pta, ptb) )
+
+            w = Part.makePolygon([pta, ptb, ptb2, pta2, pta])
+            w = du.roundCorners(w, [pta2, ptb2], 3)
+            flap = Part.Face(w).cut([ Part.makeSphere(0.5, pt) for pt in (pta, ptb) ])
+
+            center = (pta+ptb)/2 + ch*v
+            fc = Part.Face(Part.Wire(Part.makeCircle(self.P.snapHoleDia, center, normal)))
+            mount = mount.fuse(flap.cut(fc))
+            bib = bib.cut(fc.extrude(8*normal).translate(-4*normal))
+
+        return BibData(Bib=bib, Mount=mount)
+
+
+    @cached_property
+    def BibUnwrapped(self):
+        unwrapped = du.unwrapShape(self.doc, self.Bib )
+        rotateUntil(unwrapped, du.linspace(0,180,30) )
+        return unwrapped
+
+    @cached_property
     def DiffuserFrontTabs(self):
         return [ self.diffuserFrontTab(ps) for ps in self.frontTabParams ]
 
@@ -444,17 +619,8 @@ class Model:
 
     @cached_property
     def LensCut(self):
-        return self.LensCutSmooth()
-
-    def LensCutRectangle(self):
-        """Builds the shape used to cut the lens."""
-        r = self.P.lensDia / 2
-        h = 400
-        down = 200
-
-        shp = Part.Face(Part.makePolygon([-r*X, r*X, r*X-down*Z, -r*X-down*Z, -r*X]))
-        # Calls the lens method
-        return shp.translate(-h/2*Y).extrude(h*Y).fuse(self.lens)
+        # return self.LensCutSmooth()
+        return self.LensCutExperimental()
 
     def LensCutSmooth(self):
         ll, lr = self.BottomSideLines
@@ -489,29 +655,96 @@ class Model:
         f = Part.Face( Part.Wire([bez] + poly.Edges) )
         return f.extrude(200*Y).translate(-100*Y)
 
+    def LensCutExperimental(self):
+        r = self.P.lensDia / 2
+        pts = [ r*du.angleVec(a,X,Z) for a in du.linspace(180, 0, 8) ]
+
+        pts = [ pts[0] + 200*du.angleVec(10,-Z,-X) ] + pts + [ pts[-1] + 200 *du.angleVec(10,-Z,X) ]
+        bez = Part.BSplineCurve(pts).toShape()
+
+        w = Part.Wire([bez, Part.makeLine(pts[-1], pts[0]) ])
+        f = Part.Face(w)
+        return f.extrude(200*Y).translate(-100*Y)
+
+    def LensCutExperimental0(self):
+        ll, lr = self.BottomSideLines
+
+        # removing y by scale
+        l1, l0 = [ (1*pt).scale(1,0,1) for pt in ll ]
+
+        r = self.P.lensDia / 2
+        v = (l1-l0).normalize()
+
+        ptsCenter = [ r*du.angleVec(a,X,Z) for a in du.linspace(180, 0, 8) ]
+
+        zBottom = (l0 - 35*v).z
+
+        # bottom round arc
+
+        arcPts = [ l0, Z*(l0.z - 30), (1*l0).scale(-1,1,1) ]
+        arc = Part.ArcOfCircle(l0, Z*(l0.z - 30), (1*l0).scale(-1,1,1)).toShape()
+        ac = arc.Curve
+
+        ptsPoly = [ l0, l0-50*X, l0-50*X-120*Z ]
+        ptsPoly = [ (1*pt).scale(-1,1,1) for pt in ptsPoly ] + ptsPoly[::-1]
+
+        def arcParam(k):
+            pt0 = k*r*X 
+            e = Part.makeLine(pt0 - 100*Z, pt0 + 100*Z)
+            # bottom intersection
+            pts = [ vec(pt.X, pt.Y, pt.Z) for pt in ac.intersectCC(e.Curve) ]
+            pts.sort(key=lambda pt:pt.z)
+            return ac.parameter(pts[0])
+
+        pLeft, pRight = arcParam(-1), arcParam(1)
+
+        w = Part.Wire([
+            Part.Edge(ac, arc.FirstParameter, pLeft),
+            Part.BSplineCurve( [ ac.value(pLeft)  ] + ptsCenter + [ ac.value(pRight) ]).toShape(),
+            Part.Edge(ac, pRight, arc.LastParameter)
+        ] + Part.makePolygon(ptsPoly).Edges )
+
+        Part.show(w, "wx")
+        Part.show(Part.makePolygon(ptsPoly), "wx0")
+         
+        f = Part.Face(w)
+        return f.extrude(200*Y).translate(-100*Y)
+
 
     @cached_property
     def Bottom(self):
         """Creates the shape of the bottom part."""
-        # rim = 15
-        rim = 0
-        if self.P.coverConnectedByTabs:
-            rim = 15
-        z2 = -self.P.lensDia/2 - 15
-        w = self.P.flashHeadWidth + 2*self.P.flashHeadSpaceLeft
+        ll, lr  = self.BottomSideLines
 
-        pt1 = self.flashPoint - w/2*X
+        pts = lr[::-1] + ll
+        w = Part.Wire( Part.makePolygon(pts).Edges + [ self.BottomEdge ])
+        f = Part.Face(w)
+
+        f = f.cut(self.LensCutExperimental())
+
+        return f
+
+    def Bottom0(self):
+        """Creates the shape of the bottom part."""
+        rim = 0 if not(self.P.coverConnectedByTabs) else 15
+
+
+        zbottom = 15
+        zbottom = 45
+        z2 = -self.P.lensDia/2 - zbottom 
+
+        pt1 = self.flashPoint - (self.P.flashHeadWidth/2 + self.P.flashHeadSpaceLeft)*X
 
         orim = self.FrontRim
-        pt0 = next((pt for pt in [orim.valueAt(p) for p in [orim.FirstParameter, orim.LastParameter]] if pt.x < 0))
+        # pt0 = next((pt for pt in [orim.valueAt(p) for p in [orim.FirstParameter, orim.LastParameter]] if pt.x < 0))
+        pt0 = next((pt for pt in [orim.valueAt(p) for p in orim.ParameterRange] if pt.x < 0))
         # Linearly interpolate to z2, then offset by rim*X
         pt2 = pt1 + (pt0-pt1) * (z2-pt1.z)/(pt0.z-pt1.z) - rim*X
 
         pt1 -= rim*X
-        # du.symX is assumed to be available
         pts = [pt2, pt1, du.symX(pt1), du.symX(pt2), pt2 ]
         w = Part.makePolygon(pts)
-        w = du.roundCorners(w, [pt2, du.symX(pt2)], 8)
+        Part.show(w, "w")
         f = Part.Face(w).cut(self.LensCut)
 
         if self.P.coverConnectedByTabs:
@@ -522,110 +755,9 @@ class Model:
 
         return f
 
-    def bottomSideLine(self, i):
-        p0, p1 = [ c.valueAt(c.ParameterRange[i]) for c in [self.CoverBackRim, self.FrontRim] ]
-        return [ p0, p1 + (p1-p0).normalize() * self.P.coverFrontMargin ]
-
     def coverSideLine(self, i):
         uvs = self.CoverBase.ParameterRange
         return [ self.CoverBase.valueAt(uvs[i], v) for v in uvs[2:] ]
-
-    @cached_property
-    def bottomFoldAxis(self):
-        pt0, pt1 = self.PtSideFlash, self.PtDiffuserBottom 
-
-        vt = (pt1-pt0).normalize()
-
-        # normal vector is perpendicular to line and to axis of the bottom plane 
-        axis = -1*vt.cross(self.BottomPlane.Surface.Axis)
-
-        # axis is rotatated by an angle of 45 back
-        rot = FreeCAD.Rotation()
-        rot.Angle = math.radians(45)
-        rot.Axis  = -vt
-        axis      = rot * axis
-        return axis
-
-    def makeBottomFlap2(self, symX):
-        pt0, pt1, axis = self.PtSideFlash, self.PtDiffuserBottom, self.bottomFoldAxis
-
-        if symX:
-            pt0 = du.symX(pt0)
-            pt1 = du.symX(pt1)
-            axis = du.symX(axis)
-
-        vt = (pt1-pt0).normalize()
-
-        pln = Part.Plane(pt0, axis)
-        v = self.P.bottomTabWidth * axis.cross(vt)
-        if v.y > 0:
-            v = -v
-
-        w = Part.makePolygon([pt0,pt0+v,pt1+v, pt1, pt0])
-        w = du.roundCorners(w, [pt0+v,pt1+v], 8)
-        f = Part.Face(pln, w)
-
-        # holes to connect bottom with the cover
-        vn = (1*v).normalize()*self.P.bottomTabWidth / 2
-        r = 0.5
-        for pt in du.linspace(pt0 + vt*15 + vn, pt1 - vt*15 + vn, 2):
-            c = Part.Circle()
-            c.Axis = axis
-            c.Location = pt
-            c.Radius = r
-            f = f.cut( Part.Face(Part.Wire(c.toShape())) )
-
-        # holes marking the corners
-        r = 0.5
-        for pt in [pt0, pt1]:
-            c = Part.Circle()
-            c.Axis = axis 
-            c.Location = pt
-            c.Radius = r
-            f = f.cut( Part.Face(Part.Wire(c.toShape())) )
-        return f
-
-    def makeBottomFlapOrig(self, symX, reverseNormal):
-        pt0, pt1 = self.coverSideLine(0)
-        axis = self.bottomFoldAxis
-        if symX:
-            pt0 = du.symX(pt0)
-            pt1 = du.symX(pt1)
-            axis = du.symX(axis)
-
-        vt = (pt1-pt0).normalize()
-
-        # plane of the flap
-        pln = Part.Plane(pt0, axis)
-        v = self.P.bottomTabWidth * (axis.cross(vt))
-        if v.y > 0:
-            v = -v
-
-        w = Part.makePolygon([pt0,pt0+v,pt1+v, pt1, pt0])
-        w = du.roundCorners(w,[pt0+v,pt1+v], 8)
-        f = Part.Face(pln, w)
-
-        # holes to connect bottom with the cover
-        vn = (1*v).normalize()*self.P.bottomTabWidth / 2
-        pt00 = pt0 + vt*15 + vn
-        pt11 = pt1 - vt*15 + vn
-        r = 0.5
-        for pt in du.linspace(pt00, pt11, 2):
-            c = Part.Circle()
-            c.Axis = axis
-            c.Location = pt
-            c.Radius = r
-            f = f.cut( Part.Face(Part.Wire(c.toShape())) )
-
-        # holes marking the corners
-        r = 0.5
-        for pt in [pt0, pt1]:
-            c = Part.Circle()
-            c.Axis = axis 
-            c.Location = pt
-            c.Radius = r
-            f = f.cut( Part.Face(Part.Wire(c.toShape())) )
-        return f
 
     # side 0 is left, side 1 is right
     def makeCoverFold(self, side):
@@ -686,9 +818,9 @@ class Model:
             f = f.cut( Part.Solid(Part.Shell([c.toShape()])) )
         return f
 
-    def makeCoverHoles(self, symX):
+    def makeCoverHoles(self, mirror):
         pt0, pt1 = self.PtSideFlash, self.PtDiffuserBottomMargin
-        if symX:
+        if mirror:
             pt0 = du.symX(pt0)
             pt1 = du.symX(pt1)
         vt = (pt1 - pt0).normalize()
@@ -706,7 +838,7 @@ class Model:
 
         # holes to connect bottom with the cover
         cyls = []
-        r = 0.5
+        r = self.P.snapHoleDia / 2
         for pt in du.linspace(vpt0, vpt1, 2):
             c = Part.Circle()
             c.Axis = axis
@@ -740,23 +872,6 @@ class Model:
         """The final bottom shape with cuts for the inner flaps."""
 
         return self.Bottom.cut(self.makeCoverHoles(False)+self.makeCoverHoles(True)+self.BottomSlots)
-
-    @cached_property
-    def CoverStrapCut(self):
-        # rectangular cut for the strap
-        ptc = self.flashPoint + Z*self.P.flashHeadHeight*0.1 + 12*Y
-        w, h = 3, 18
-        pts = [ptc + w*y/2*Y+h*z/2*Z for y,z in [ [-1,-1], [1,-1], [1,1], [-1,1], [-1,-1] ] ]
-
-        f = Part.Face(Part.makePolygon(pts))
-        for pt in [ pts[0], pts[3] ]:
-            c = Part.Circle()
-            c.Radius = w
-            c.Location = pt
-            c.Axis = X
-            f = f.fuse(Part.Face(Part.Wire(c.toShape())))
-
-        return du.thicken(f, X*(self.P.flashHeadWidth+40))
 
     def coverFlashFlap(self, side):
         depth = 35
@@ -792,11 +907,9 @@ class Model:
     def Cover(self):
         """Builds the cover with cuts for the flaps and other features."""
 
-        # Flash head profile points
-        # small round cuts to see where the flash is
+        # small spheres marking flash head corners
         pt0 = self.flashPoint + self.P.flashHeadWidth/2*X
-        pt1 = pt0 + Z*(self.P.flashHeadHeight+2) # + self.P.flashHeadDepth*Y
-        # small round cuts to see where the flash is
+        pt1 = pt0 + Z*(self.P.flashHeadHeight+2)
         flashMarks = [ Part.makeSphere(2.5).translate(pt) for pt in [pt0, pt1, du.symX(pt0), du.symX(pt1)] ]
 
         appendages = []
@@ -809,22 +922,6 @@ class Model:
                 appendages.append( self.makeCoverFold(side) )
 
         return self.CoverBase.fuse(appendages).cut(self.CoverFrontSlots + flashMarks)
-
-    @cached_property
-    def SensorCone(self):
-        """Builds the sensor cone shape."""
-        depth = 300
-        vv = self.P.lensFocal*Y + self.P.SensorWidth/2*X + self.P.SensorHeight/2*Z
-        vv = vv / vv.y
-
-        # tip of the cone (pyramid)
-        yTip = -self.P.lensDepth - self.P.focalPlaneShift + self.P.lensFocal
-
-        shp = Part.makeLoft([
-            Part.makePolygon([ v, (1*v).scale(-1,1,1), (1*v).scale(-1,1,-1), (1*v).scale(1,1,-1), v ])
-            for v in [ yTip * Y + vv * (y - yTip) for y  in [0, depth]]
-            ])
-        return shp
 
     @cached_property
     def CoverFrontSlots(self):
@@ -860,7 +957,6 @@ class Model:
         rotateUntil(unwrapped, du.linspace(0,180,30) )
         return unwrapped
 
-
     @cached_property
     def DiffUnwrapped(self):
         """Builds the flattened (unwrapped) diffuser shape."""
@@ -886,43 +982,14 @@ class Model:
         return box
 
     @cached_property
-    def Lens(self):
-        """Generates the lens shape (a cylinder)."""
-        c = Part.Circle()
-        c.Radius = self.P.lensDia / 2
-        c.Location = -self.P.lensDepth * Y
-        c.Axis = Y
-        return Part.Face(Part.Wire(c.toShape())).extrude(self.P.lensDepth*Y)
-
-    @cached_property
-    def lens(self):
-        """Generates the lens shape (a cylinder)."""
-        r = self.P.lensDia / 2
-        h = 400
-
-        n = 60
-        pts = [ r * du.angleVec(angle, X, Z) for angle in du.linspace(-90, 270, n) ]
-
-        bez = Part.BSplineCurve(pts, periodic=True).toShape()
-        shp = Part.Face(Part.Wire(bez))
-        return du.thicken(shp, h*Y)
-
-    @cached_property
     def PtDiffuserTop(self):
-        """Calculates a point on the cone's base plane for diffuser_cone2."""
-        pt0 = Z*(10 + self.P.lensDia/2) + 0*Y
-        pt0 = Z*( self.P.lensDia/2) + 0*Y
-        # Accesses self.BottomPlane (a cached property)
+        pt0 = Z * (self.P.lensDia/2)
         pt = self.BottomPlane.Surface.intersect(Part.Line(pt0, pt0 + 100*Y))[0][0]
         return vec(pt.X, pt.Y, pt.Z)
 
-    @cached_property 
+    @cached_property
     def PtDiffuserBottom(self):
-        """Calculates a second point on the cone's base plane for diffuser_cone2."""
-        pt1 = -self.P.lensDia / 5 * Z + (50 + self.P.lensDia/2)*X
-        pt1 = -self.P.lensDia / 5 * Z + (45 + self.P.lensDia/2)*X
-
-        # Accesses self.BottomPlane (a cached property)
+        pt1 = -self.P.lensDia/5 * Z + (45 + self.P.lensDia/2)*X
         pt = self.BottomPlane.Surface.intersect(Part.Line(pt1, pt1 + 100*Y))[0][0]
         return vec(pt.X, pt.Y, pt.Z)
 
@@ -932,7 +999,6 @@ class Model:
         ptBottom = self.PtDiffuserBottom
         return ptBottom + (ptBottom-ptUp).normalize()*self.P.coverFrontMargin
 
-    # --- Main Execution Method ---
     def showUnwrapped(self, pt0):
         W,H = 400,300
         pt1 = pt0+W*X  
@@ -947,18 +1013,15 @@ class Model:
         Part.show(self.CoverUnwrapped, "cover-unwrapped")
 
         diff = self.DiffUnwrapped
-        # diff.rotate(O,Z,110)
         diff.rotate(O,Z,90)
         bb = diff.BoundBox
-        self.DiffUnwrapped.translate(pt0 + 5*Y + 525*X -X*bb.XMin-Y*bb.YMin)
-        Part.show(self.DiffUnwrapped, "diff-unwrapped")
+        diff.translate(pt0 + 5*Y + 525*X -X*bb.XMin-Y*bb.YMin)
+        Part.show(diff, "diff-unwrapped")
 
         bt = self.BottomUnwrapped
-        #bt.rotate(O,Z,180)
-        #bt.rotate(O,Z,90)
-        bb = self.BottomUnwrapped.BoundBox
-        self.BottomUnwrapped.translate(pt0 + 285*X + 343*Y -X*bb.XMin-Y*bb.YMin)
-        Part.show(self.BottomUnwrapped, "bottom-unwrapped")
+        bb = bt.BoundBox
+        bt.translate(pt0 + 285*X + 343*Y -X*bb.XMin-Y*bb.YMin)
+        Part.show(bt, "bottom-unwrapped")
 
     def solids(self):
         return [ self.Cover, self.BottomComplete, self.Diffuser, self.FlashHead]
@@ -1019,13 +1082,12 @@ class Model:
         body = body.fuse( self.coverFlashFlap(side))
 
         # mount hole
-        r = 0.5
+        r = self.snapHoleDia / 2
         f = Part.Face(Part.Wire([Part.makeCircle(r)]))
         cyl = f.rotate(O,Y,90).translate(self.flashPoint + 20*Y + 12*Z ).extrude(100*X).translate(-50*X)
         body = body.cut(cyl)
 
         return body
-
 
     def bottomStitchParams(self, side):
         return st.Params(

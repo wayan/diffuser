@@ -43,7 +43,7 @@ def slotFace(e, sfc, depth):
 def tabInterFace(curve, sfc, before, after, depths):
     uss = [ du.lerp_list(*curve.ParameterRange, p) for p in [before,after] ]
 
-    # we start with slightly slated secants
+    # we start with slightly slanted secants
     secs = [ du.secant(curve, *us) for us in uss ] 
 
     (_, u_min), (u_max, _) = uss

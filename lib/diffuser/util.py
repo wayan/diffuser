@@ -3,10 +3,6 @@ import FreeCAD, Part, Mesh, MeshPart, math, ImportGui, FreeCADGui
 def vec(x=0,y=0,z=0):
     return FreeCAD.Vector(x,y,z)
 
-XAxis = vec(1)
-YAxis = vec(0,1)
-ZAxis = vec(0,0,1)
-
 X = vec(1)
 Y = vec(0,1)
 Z = vec(0,0,1)
@@ -39,8 +35,8 @@ def circle2d(sfc, center, r, n=10):
     w = Part.Wire([ bez.toShape(sfc) ])
     return Part.Face(sfc, w)
 
-def thicken(shp, vec):
-    return shp.extrude(vec).translate(-vec/2)
+def thicken(shp, direction):
+    return shp.extrude(direction).translate(-direction/2)
 
 # clone vector
 def cvec(p,x=None,y=None,z=None):
@@ -69,7 +65,7 @@ def nutPocket(dia, height):
         f = f.makeFillet(0.1, edges)
     return f
 
-# "ortogonal" rectangle
+# "orthogonal" rectangle
 def ortoRecPts(p1, p3):
     p2, p4 = [ vec(p.x, p.y, p.z) for p in [p1,p1]]
     if p1.x == p3.x:
@@ -206,3 +202,10 @@ def line_cut(wire, r=0.01):
 
     # Sweep the circle along the wire to create a solid 'hair'
     return wire.makePipe(Part.Face(profile))
+
+# Step 2 — find the edge that passes through pt1
+def point_on_edge(pt, edge, tol=1e-4):
+    """Check if a point lies on an edge within tolerance."""
+    dist, _, _ = edge.distToShape(Part.Vertex(pt))
+    print("DIST", dist)
+    return dist < tol
