@@ -219,7 +219,7 @@ class DiffuserModel:
         ptTip = pt0 + self.coneTipShift * du.angleVec(self.diffuserConeAngle, -Y, -Z)
 
         # Uses the circumcenter method
-        axis = circumcenter(*[ (p-ptTip).normalize() for p in [pt0, pt1, du.symX(pt1) ]])
+        axis = circumcenter(*[ (p-ptTip).normalize() for p in [pt0, pt1, du.flip_x(pt1) ]])
 
         A = (pt0-ptTip)
         B = axis
@@ -271,7 +271,7 @@ class DiffuserModel:
         e = self.frontEllipse
         pt = (1*self.PtDiffuserBottom).scale(1,0,1)
         p0 = e.parameter(pt)
-        p1 = e.parameter(du.symX(pt))
+        p1 = e.parameter(du.flip_x(pt))
         arc =  Part.ArcOfEllipse(e, p1, p0)
 
         shp = arc.toShape()
@@ -350,7 +350,7 @@ class DiffuserModel:
         e = s.SubShapes[0]
         pt = self.PtDiffuserBottom
         p0 = e.Curve.parameter(pt)
-        p1 = e.Curve.parameter(du.symX(pt))
+        p1 = e.Curve.parameter(du.flip_x(pt))
         pts = [ e.valueAt(p) for p in du.linear_space(p0,p1,40) ]
         if pts[0].x < pts[-1].x:
             pts.reverse()
@@ -368,9 +368,9 @@ class DiffuserModel:
         pt0 = self.flashPoint - w/2*X - self.flashHeadSpaceLeft*X
         pt1 = pt0 + self.flashHeadHeight*Z 
         pt2 = pt1 + self.flashHeadSpaceUp*Z 
-        pts = du.betweenList(pt0,pt1,[0,0.3,0.6,0.8,0.8,1,1,1,1]) + du.betweenList(pt2, du.symX(pt2),[0, 0.5]) 
+        pts = du.betweenList(pt0,pt1,[0,0.3,0.6,0.8,0.8,1,1,1,1]) + du.betweenList(pt2, du.flip_x(pt2),[0, 0.5]) 
 
-        return pts + [ du.symX(p) for p in pts[:-1][::-1]]
+        return pts + [ du.flip_x(p) for p in pts[:-1][::-1]]
 
     @cached_property
     def CoverBackRim(self):
@@ -481,9 +481,9 @@ class DiffuserModel:
         pt2 = pt1 + (pt0-pt1) * (z2-pt1.z)/(pt0.z-pt1.z) - rim*X
 
         pt1 -= rim*X
-        # du.symX is assumed to be available
-        w = Part.makePolygon([pt2, pt1, du.symX(pt1), du.symX(pt2), pt2 ])
-        w = du.roundCorners(w, [pt2, du.symX(pt2)], 8)
+        # du.flip_x is assumed to be available
+        w = Part.makePolygon([pt2, pt1, du.flip_x(pt1), du.flip_x(pt2), pt2 ])
+        w = du.roundCorners(w, [pt2, du.flip_x(pt2)], 8)
         shp = Part.Face(w)
         shp = shp.cut(self.LensCut)
         return shp
@@ -512,13 +512,13 @@ class DiffuserModel:
         axis      = rot * axis
         return axis
 
-    def makeBottomFlap2(self, symX):
+    def makeBottomFlap2(self, flip_x):
         pt0, pt1, axis = self.PtSideFlash, self.PtDiffuserBottom, self.bottomFoldAxis
 
-        if symX:
-            pt0 = du.symX(pt0)
-            pt1 = du.symX(pt1)
-            axis = du.symX(axis)
+        if flip_x:
+            pt0 = du.flip_x(pt0)
+            pt1 = du.flip_x(pt1)
+            axis = du.flip_x(axis)
 
         vt = (pt1-pt0).normalize()
 
@@ -551,13 +551,13 @@ class DiffuserModel:
             f = f.cut( Part.Face(Part.Wire(c.toShape())) )
         return f
 
-    def makeBottomFlapOrig(self, symX, reverseNormal):
+    def makeBottomFlapOrig(self, flip_x, reverseNormal):
         pt0, pt1 = self.coverSideLine(0)
         axis = self.bottomFoldAxis
-        if symX:
-            pt0 = du.symX(pt0)
-            pt1 = du.symX(pt1)
-            axis = du.symX(axis)
+        if flip_x:
+            pt0 = du.flip_x(pt0)
+            pt1 = du.flip_x(pt1)
+            axis = du.flip_x(axis)
 
         vt = (pt1-pt0).normalize()
 
@@ -598,8 +598,8 @@ class DiffuserModel:
 
         pt0, pt1 = self.PtSideFlash, self.PtDiffuserBottomMargin
         if side==LEFT:
-            pt0 = du.symX(pt0)
-            pt1 = du.symX(pt1)
+            pt0 = du.flip_x(pt0)
+            pt1 = du.flip_x(pt1)
 
         vt = (pt1 - pt0).normalize()
         axis = self.BottomPlane.Surface.Axis
@@ -676,11 +676,11 @@ class DiffuserModel:
             f = f.cut( Part.Solid(Part.Shell([c.toShape()])) )
         return f
 
-    def makeCoverHoles(self, symX):
+    def makeCoverHoles(self, flip_x):
         pt0, pt1 = self.PtSideFlash, self.PtDiffuserBottomMargin
-        if symX:
-            pt0 = du.symX(pt0)
-            pt1 = du.symX(pt1)
+        if flip_x:
+            pt0 = du.flip_x(pt0)
+            pt1 = du.flip_x(pt1)
         vt = (pt1 - pt0).normalize()
         axis = self.BottomPlane.Surface.Axis
         if axis.z > 0:
@@ -781,7 +781,7 @@ class DiffuserModel:
         pt0 = self.flashPoint + self.flashHeadWidth/2*X
         pt1 = pt0 + Z*(self.flashHeadHeight+2) # + self.flashHeadDepth*Y
         # small round cuts to see where the flash is
-        flashMarks = [ Part.makeSphere(2.5).translate(pt) for pt in [pt0, pt1, du.symX(pt0), du.symX(pt1)] ]
+        flashMarks = [ Part.makeSphere(2.5).translate(pt) for pt in [pt0, pt1, du.flip_x(pt0), du.flip_x(pt1)] ]
 
         # rectangular cut for the strap
         # cover = cover.cut( self.CoverStrapCut )
@@ -1140,7 +1140,7 @@ class DiffuserModel:
 
 def coneTriangle(self):
     pt0 = diff.coneTip + diff.coneAxis*550 - 250*X
-    f = Part.Face(Part.makePolygon([diff.coneTip, pt0, du.symX(pt0), diff.coneTip]))
+    f = Part.Face(Part.makePolygon([diff.coneTip, pt0, du.flip_x(pt0), diff.coneTip]))
     return f
 
 def do_stuff(doc):

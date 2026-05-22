@@ -113,13 +113,13 @@ def unwrapShape(doc, shp):
     doc.removeObject(meshobj.Name)
     return ret
 
-def symX(p):
+def flip_x(p):
     return vec(-p.x,p.y,p.z)
 
-def symY(p):
+def flip_y(p):
     return vec(p.x,-p.y,p.z)
 
-def symZ(p):
+def flip_z(p):
     return vec(p.x,p.y,-p.z)
 
 def symBy(v):
@@ -187,6 +187,9 @@ def lerp_tuple(t1, t2, k):
 def lerp_list(p1, p2, ks):
     """Linear interpolation for a list of factors."""
     return [p1 * (1 - k) + p2 * k for k in ks]
+
+def lerp_tuple_list(t1, t2, ks):
+    return [lerp_tuple(t1,t2,k) for k in ks]
 
 def linspace(f, to, n):
     return [ lerp(f,to, i/n ) for i in range(n+1) ]

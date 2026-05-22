@@ -18,10 +18,13 @@ def do_stuff(doc):
     P = model.Params( coverConnectedByTabs=False, skipMiddleTab=True)
     diff = model.Model(doc, P)
     g = Grid()
-    Part.show(diff.Bib, "bib")
-    Part.show(diff.BibMount, "bib-mount")
+    Part.show(diff.bib, "bib")
+    Part.show(diff.BibCone, "bib-cone")
+    Part.show(diff.back_plate_complete, "bottom")
+    Part.show(diff.bib_mount, "bib-mount")
+    Part.show(g.add(diff.unwrap(diff.bib)), "bib-u")
+    Part.show(g.add(diff.unwrap(diff.bib_mount)), "bib-um")
     return
-    Part.show(g.add(diff.BibUnwrapped), "bib-u")
 
     Part.show(diff.BottomComplete, "bottom")
     Part.show(diff.BottomUnwrapped, "bu")
