@@ -1,4 +1,4 @@
-import FreeCAD, Part, Mesh, MeshPart, math, ImportGui, FreeCADGui
+import FreeCAD, Part, Mesh, MeshPart, math, ImportGui, FreeCADGui, copy
 
 def vec(x=0,y=0,z=0):
     return FreeCAD.Vector(x,y,z)
@@ -12,7 +12,10 @@ Vector2d = FreeCAD.Base.Vector2d
 
 # poly2d can accept list of tuples or 2d points
 def poly2d(pts):
-    return [ Part.Geom2d.Line2dSegment(pt2d(p), pt2d(q)) for p,q in zip(pts,pts[1:]) ]
+    return [ line2d(p,q) for p,q in zip(pts,pts[1:]) ]
+
+def line2d(p, q):
+    return Part.Geom2d.Line2dSegment(pt2d(p), pt2d(q)) 
 
 # bez2d can accept list of tuples or 2d points
 def bez2d(poles, periodic=False):
@@ -28,7 +31,7 @@ def circle2d(sfc, center, r, n=10):
     x, y = [ r * v for v in sfc.tangent(*uv) ]
 
     def pt2(angle):
-        pt = center + angleVec(angle, x, y)
+        pt = center + angle_vec(angle, x, y)
         return Vector2d(*sfc.parameter(pt)) 
 
     bez = bez2d([ pt2(a) for a in linspace(0,360,n) ], True)
@@ -90,7 +93,7 @@ def ortoRecFace(p1,p3):
 def rads(deg):
     return deg*math.pi/180        
 
-def angleVec(deg, xv=None, yv=None):
+def angle_vec(deg, xv=None, yv=None):
     r = math.radians(deg)
     return math.cos(r)*( vec(1,0,0) if xv is None else xv) + math.sin(r)*( vec(0,1,0) if yv is None else yv)
 
@@ -134,7 +137,7 @@ def edgeSecant(e):
      return (e.valueAt(e.LastParameter) - e.valueAt(e.FirstParameter)).normalize()
 
 # replace the corner in wire by BSplineCurve
-def roundCorner(w, pt, r=2):
+def round_corner(w, pt, r=2):
     tolerance = 1e-6
     for i, es in enumerate(zip(w.Edges, w.Edges[1:] + w.Edges[0:1])):
         e1,e2 = es
@@ -164,10 +167,34 @@ def circumcenter(A, B, C):
     """Calculates the circumcenter of three points."""
     return Part.ArcOfCircle(A, B, C).Location
 
-def roundCorners(w, pts, r=2):
+def round_corners(w, pts, r=2):
     for pt in pts:
-        w = roundCorner(w,pt,r)
+        w = round_corner(w,pt,r)
     return w
+
+def rounded_polygon(pts, closed=True):
+    """Polygon wire through pts. A point given as (pt, r) gets a rounded corner:
+    both edges are cut back by r and joined by a curve tangent to them,
+    the same curve round_corner makes. Plain points stay sharp."""
+    verts = [p if isinstance(p, tuple) else (p, 0) for p in pts]
+    n = len(verts)
+
+    corners = []    # per vertex: (where the incoming edge ends, where the outgoing edge starts, curve)
+    for i, (p, r) in enumerate(verts):
+        if r == 0 or (not closed and i in (0, n-1)):
+            corners.append((p, p, None))
+            continue
+        a = p + (verts[i-1][0] - p).normalize()*r
+        b = p + (verts[(i+1) % n][0] - p).normalize()*r
+        corners.append((a, b, Part.BSplineCurve([a, p, b]).toShape()))
+
+    edges = []
+    for i in range(n if closed else n-1):
+        _, start, curve = corners[i]
+        if curve:
+            edges.append(curve)
+        edges.append(Part.makeLine(start, corners[(i+1) % n][0]))
+    return Part.Wire(edges)
 
 def sub_edge(e, uns):
     return Part.Edge(e.Curve, *lerp_list(*e.ParameterRange, uns))
@@ -180,6 +207,12 @@ def edge_at_dist(e,l,from_end=False):
 def lerp(p1, p2, k):
     """Linear interpolation lerp p1 and p2 by factor k (0 to 1)."""
     return p1 * (1 - k) + p2 * k
+
+def lerp_fn(p1, p2):
+    def l(k):
+        """Linear interpolation lerp p1 and p2 by factor k (0 to 1)."""
+        return p1 * (1 - k) + p2 * k
+    return l
 
 def lerp_tuple(t1, t2, k):
     return tuple(lerp(p1,p2,k) for p1,p2 in zip(t1,t2))
@@ -210,5 +243,46 @@ def line_cut(wire, r=0.01):
 def point_on_edge(pt, edge, tol=1e-4):
     """Check if a point lies on an edge within tolerance."""
     dist, _, _ = edge.distToShape(Part.Vertex(pt))
-    print("DIST", dist)
     return dist < tol
+
+def project_to_plane(v, axis):
+    u_norm = FreeCAD.Vector(axis)  # copy
+    u_norm.normalize()
+    return v - u_norm * v.dot(u_norm)
+
+def connect_edges_with_lines(edges, closed=False, tolerance=1e-6):
+    result = []
+
+    def append_edge(e_current, e_next):
+        result.append(e_current)
+
+        end_pt   = e_current.valueAt(e_current.LastParameter)
+        start_pt = e_next.valueAt(e_next.FirstParameter)
+
+        if end_pt.distanceToPoint(start_pt) > tolerance:
+            result.append(Part.makeLine(end_pt, start_pt))
+
+    for e_current, e_next in zip(edges, edges[1:]):
+        append_edge(e_current, e_next)
+
+    if closed:
+        append_edge(edges[-1], edges[0])
+    else:
+        result.append(edges[-1])
+
+    return result
+
+def param_at_dist(edge):
+    def param(d, from_right=False):
+        if from_right:
+            d = edge.Length - d
+        return edge.Curve.parameterAtDistance(d, edge.FirstParameter)
+    return param
+
+def reverse_edge(edge):
+    c = edge.Curve.copy()
+    c.reverse()
+    return c.toShape(*map(c.parameter, map(edge.valueAt, edge.ParameterRange)))
+
+sym_x_matrix = FreeCAD.Base.Matrix()
+sym_x_matrix.A11 = -1

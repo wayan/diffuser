@@ -3,27 +3,32 @@ import diffuser.util as du
 
 Vector2d = FreeCAD.Base.Vector2d
 
-def buildTabFace(is_curved):
+def buildTabFace(is_curved=False, use_secant=True):
     def face(e, sfc, depths, minlen=5):
+        d_min, d_max = depths
         sec = du.edgeSecant(e)
         cols = []
         num_steps = math.ceil(e.Length / minlen)
 
         for k in du.linspace(0, 1, num_steps):
-            pt = e.valueAt(du.lerp(*e.ParameterRange, k))
+            u = du.lerp(*e.ParameterRange, k)
+            pt = e.valueAt(u)
             uv = sfc.parameter(pt)
-            tan = sec.cross(sfc.normal(*uv))
+
+            if use_secant:
+                tan = sec.cross(sfc.normal(*uv))
+            else:
+                tan = e.tangentAt(u).cross(sfc.normal(*uv))
 
             # Determine depth profile
             if is_curved:
                 # Apply parabolic taper to the second depth value
                 taper = du.lerp(0.4, 1, 1 - abs(2*k - 1)**2)
-                curr_depths = [depths[0], depths[1] * taper]
             else:
-                curr_depths = depths
+                taper = 1
 
             # Project 3D offsets into 2D UV points
-            col = [ sfc.parameter(pt + d * tan) for d in curr_depths]
+            col = tuple( sfc.parameter(pt + d * tan) for d in (d_min, taper * d_max) )
             cols.append(col)
 
         # Construct geometry
@@ -33,8 +38,9 @@ def buildTabFace(is_curved):
     return face
 
 # Create the specific function instances
-tabFaceCurved = buildTabFace(True)
-tabFaceRec    = buildTabFace(False)
+tabFaceCurved = buildTabFace(True, True)
+tabFaceRec    = buildTabFace(False, True)
+tabFaceRecTan = buildTabFace(False, False)
 
 # simple - rectangular symmetrical face on a surface
 def slotFace(e, sfc, depth):

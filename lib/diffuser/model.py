@@ -2,140 +2,15 @@ import FreeCAD, Part, Mesh, MeshPart, math
 
 import BOPTools.SplitAPI
 
-from dataclasses import dataclass, field
 from functools import cached_property
 
 import diffuser.util as du
 import diffuser.tabs as dt
 from diffuser.util import vec, X, Y, Z, O
-import diffuser.stitch as st 
+import diffuser.stitch as st
 
-import typing
-
-class BibData(typing.NamedTuple):
-    bib: typing.Any
-    mount: typing.Any
-
-class BibCone(typing.NamedTuple):
-    cone: typing.Any
-    tip: typing.Any
-    axis: typing.Any
-
-def rotateUntil(shp, angles):
-    c = shp.CenterOfGravity
-    minAngle = None
-    minDiag  = None
-    currAngle = 0
-    for angle in angles:
-        if angle != currAngle:
-            shp.rotate(c, Z, angle-currAngle)
-        bb = shp.BoundBox
-        diag = bb.DiagonalLength
-        if minDiag is None or (diag < minDiag and bb.XLength >= bb.YLength):
-            minAngle = angle
-            minDiag  = diag
-        currAngle = angle
-
-    if minAngle != currAngle:
-        shp.rotate(c, Z, minAngle-currAngle)
-    return shp
-
-
-def findEllipseParams(ptTop, ptBottom, aspectRatio):
-    # closest ratio A/B
-    z0 = ptTop.z 
-    z1 = ptBottom.z
-    x = abs(ptBottom.x)
-
-    minDiff  = None
-    zCenter  = None
-    for z in du.linspace(z1, z0, 300):
-        b = z0 - z
-        y = z - z1 
-        if y >= b or y <= 0:
-            continue
-
-        a = x/math.sin(math.acos( (z-z1)/(z0-z)))
-        diff = abs(a/(z0-z)-aspectRatio)
-        if minDiff is None or diff < minDiff:
-            minDiff  = diff
-            zCenter     = z
-
-    b = z0 - zCenter
-    a = x/math.sin(math.acos( (zCenter-z1)/b))
-    return zCenter, a, b
-
-
-@dataclass
-class Params:
-    """Data-only class to hold diffuser parameters."""
-    diffuserConeAngle: float = 32
-
-    lensDepth: float = 37
-    ellipseRatio: float = 4/3
-    lensDia: float = 70.5
-    flashHeadHeight: float = 33
-    flashHeadWidth: float = 64
-    flashHeadDepth: float = 40
-    flashHeadSpaceLeft: float = 0
-    flashHeadSpaceUp: float = 8
-    focalPlaneShift: float = 10
-    diffThickness: float = 0.7
-    SensorWidth: float = 17.3
-    SensorHeight: float = 13.0
-    lensFocal: float = 14
-    coverFrontMargin: float = 8
-    coverFoldWidth: float = 14
-    snapThickness: float = 5
-
-    snapHoleDia: float = 1
-
-    coneTipShift: float = 290
-    backPlateTabWidth: float = 25
-    backPlateTabStart: float = 59
-    tabCutWidth: float = 2.5
-    coverSplitAt: float = 0.5415
-    preventTearRadius: float = 0.3
-
-    # tabs
-    diffuserFrontTabDepth: float = 16
-    diffuserBackPlateTabDepth: float = 20
-    diffuserInnerTabDepth: float = 15
-
-    coverConnectedByTabs: bool = False
-
-    # calculated fields
-    topHeight: float = field(init=False)
-    frontHeight: float = field(init=False)
-
-    # cover stitch
-    coverStitchNumTabs: int = 3
-    coverStitchTabIndent: float = 20
-    coverStitchMargin: float = 10 
-    coverStitchShift: float = 8
-    coverStitchTabHeight: float = 10
-
-    # back plate stitch(es)
-    backPlateStitchNumTabs: int = 3
-    backPlateStitchTabIndent: float = 20
-    backPlateStitchMargin: float = 10 
-    backPlateStitchShift: float = 8
-    backPlateStitchTabHeight: float = 10
-    backPlateCutShallow: bool = False
-
-    bibConeAngle: float = 25 
-    skipMiddleTab: bool = False
-
-    def __post_init__(self):
-        # Godox flash
-        lensCenterHeight = 46.5
-        self.topHeight = 195 - lensCenterHeight
-        # Meike flash   
-        # self.topHeight = 155 - self.lensCenterHeight
-        # self.flashHeadHeight = 36
-
-        # top is flat
-        self.frontHeight = self.topHeight + self.flashHeadSpaceUp # - 20
+from diffuser.params import BibData, BibCone, DiffuserCone, Params  # noqa: F401 (re-exported)
+from diffuser.geometry import rotate_until, find_ellipse_params
 
 class Model:
     """
@@ -149,12 +24,13 @@ class Model:
         self.P = P
 
     @cached_property
-    def backPlatePoint(self):
-        return self.P.lensDia/2*Z - 5*Y
+    def back_plate_point(self):
+        z = 70.5/2
+        return vec(0,-5,z)
 
     @cached_property
-    def flashPoint(self):
-        return -self.P.lensDepth*Y + (self.P.topHeight - self.P.flashHeadHeight)*Z
+    def flash_point(self):
+        return vec(0, -self.P.lensDepth, self.P.topHeight - self.P.flashHeadHeight)
 
     @cached_property
     def front_tab_params(self):
@@ -162,13 +38,13 @@ class Model:
         width = 20
         first = 80
 
-        rim = self.FrontRim
+        rim = self.front_rim
         ps = []
         #for l in du.linspace(first, rim.Length-first, n):
         #    flapParams.append([ rim.Curve.parameterAtDistance(l+k*width/2) for k in [-1,1]])
         s = [0.12, 0.23, 0.37, 0.5]
         for l in du.lerp_list(0, rim.Length, s + [1-i for i in s[:-1][::-1]]):
-            ps.append([ rim.Curve.parameterAtDistance(l+k*width/2, rim.FirstParameter) for k in [-1,1]])
+            ps.append(tuple(rim.Curve.parameterAtDistance(l+k*width/2, rim.FirstParameter) for k in (-1,1)))
 
         if self.P.skipMiddleTab:
             ps.pop(len(ps)-3)
@@ -183,9 +59,11 @@ class Model:
         width = self.P.backPlateTabWidth
         first = self.P.backPlateTabStart
 
-        rim = self.BackPlateRim
+        rim = self.back_plate_rim
+        u_left = rim.FirstParameter
+
         return [
-            ( rim.Curve.parameterAtDistance(l+k*width/2) for k in (-1,1))
+            tuple( rim.Curve.parameterAtDistance(l+k*width/2, u_left) for k in (-1,1))
                 for l in du.linspace(first, rim.Length-first, n)
         ]
 
@@ -197,97 +75,78 @@ class Model:
     @cached_property
     def sfc_back_plate(self):
         """Builds the construction plane for the back plate block."""
-        s = 600
-        pt0 = self.backPlatePoint
-        pt1 = self.flashPoint
-        return Part.makePlane(s, s, pt0, X.cross(pt1-pt0)).translate(-s/2*X + (pt1-pt0)).Surface
+        pt0 = self.back_plate_point
+        pt1 = self.flash_point
+        return Part.Plane(pt0, (pt0-pt1).cross(X))
 
-    def _buildConeParams(self):
-        """Builds the conical shape and caches Cone, coneTip, and coneAxis together."""
-        pt0 = self.PtDiffuserTop
-        pt1 = self.PtDiffuserBottom
+    @cached_property
+    def _diffuser_cone(self):
+        """Builds the conical shape and caches cone, cone_tip, and cone_axis together."""
+        pt0 = self.pt_diffuser_top
+        pt1 = self.pt_diffuser_bottom
 
-        ptTip = pt0 + self.P.coneTipShift * du.angleVec(self.P.diffuserConeAngle, -Y, -Z)
-        axis  = du.circumcenter(*[(p - ptTip).normalize() for p in [pt0, pt1, du.flip_x(pt1)]])
+        pt_tip = pt0 + self.P.cone_tipShift * du.angle_vec(self.P.diffuserconeAngle, -Y, -Z)
+        axis  = du.circumcenter(*[(p - pt_tip).normalize() for p in [pt0, pt1, du.flip_x(pt1)]])
 
-        A     = pt0 - ptTip
+        A     = pt0 - pt_tip
         B     = axis
         vDown = 2 * (A.dot(B) / B.dot(B)) * B - A
-        cone  = Part.makeLine(ptTip, ptTip + vDown.normalize() * 600).revolve(ptTip, axis, 360)
+        cone  = Part.makeLine(pt_tip, pt_tip + vDown.normalize() * 600).revolve(pt_tip, axis, 360)
 
-        self.__dict__['Cone']     = cone
-        self.__dict__['coneTip']  = ptTip
-        self.__dict__['coneAxis'] = axis
+        return DiffuserCone(cone=cone, tip=pt_tip, axis=axis)
 
     @cached_property
-    def Cone(self):
-        self._buildConeParams()
-        return self.__dict__['Cone']
+    def sfc_diff(self):
+        return self.cone.Surface
 
     @cached_property
-    def coneTip(self):
-        self._buildConeParams()
-        return self.__dict__['coneTip']
+    def cone(self):
+        return self._diffuser_cone.cone
 
     @cached_property
-    def coneAxis(self):
-        self._buildConeParams()
-        return self.__dict__['coneAxis']
-
-    @cached_property
-    def BackPlateCenterPoint(self):
+    def back_plate_center_point(self):
         z = -self.P.lensDia/2 - 25
         points, lines = self.sfc_back_plate.intersect( Part.Line(-100*Y+z*Z,100*Y+z*Z)) 
         return vec(points[0].X, points[0].Y, points[0].Z)
 
     @cached_property
     def _bib_cone(self):
-        """Builds the conical shape and caches Cone, coneTip, and coneAxis together."""
-        pt1, pt0, pt2 = self.bib_points
+        """Builds the conical shape and caches cone, cone_tip, and cone_axis together."""
+        pt1, pt0, pt2 = self.bib_pts
 
-        bibConeTipShift = 100
-        ptTip = pt0 + bibConeTipShift * du.angleVec(self.P.bibConeAngle, -Y, Z)
-        axis  = du.circumcenter(*[(p - ptTip).normalize() for p in [pt0, pt1, pt2]])
+        bib_cone_tip_shift = 60
+        pt_tip = pt0 + bib_cone_tip_shift * du.angle_vec(self.P.bibconeAngle, -Y, Z)
+        axis  = du.circumcenter(*[(p - pt_tip).normalize() for p in [pt0, pt1, pt2]])
 
-        A     = pt0 - ptTip
+        A     = pt0 - pt_tip
         B     = axis
         vDown = 2 * (A.dot(B) / B.dot(B)) * B - A
-        cone  = Part.makeLine(ptTip, ptTip + vDown.normalize() * 600).revolve(ptTip, axis, 360)
+        cone  = Part.makeLine(pt_tip, pt_tip + vDown.normalize() * 600).revolve(pt_tip, axis, 360)
 
-        return BibCone(cone=cone,tip=ptTip,axis=axis)
+        return BibCone(cone=cone,tip=pt_tip,axis=axis)
 
-    @cached_property
-    def BackPlateLeftPoint(self):
-        ll, _ = self.BackPlateSideLines
-        return ll[1]
-
-    @cached_property
-    def bib_points(self):
-        # Pair each direction vector with its specific scalar calculation
-        axis_offsets = [
-            (-(10 + self.P.lensDia) / 2 * X),
-            (-(10 + self.P.lensDia) / 2 * Z),  # You can freely change this formula later
-            ( (10 + self.P.lensDia) / 2 * X),
-        ]
-
-        # Generate the intersection points cleanly
-        pts = []
-        for pt in axis_offsets:
-            intersections, _ = self.sfc_back_plate.intersect(Part.Line(pt - 100 * Y, pt + 100 * Y))
-            p = intersections[0]
-            pts.append(vec(p.X, p.Y, p.Z))
-
-        return pts
+    def _back_plate_y(self, z):
+        intersections, _ = self.sfc_back_plate.intersect(Part.Line(vec(0, -100, z), vec(0, 100, z)))
+        p = intersections[0]
+        return p.Y
 
     @cached_property
-    def BackPlateEdge(self):
-        pt0 = self.BackPlateLeftPoint
+    def bib_pts(self):
+        # points in x,z
+        r = self.P.lensDia/2
+        pts2d = [ (-(r+15), 0),  (0, -(r+15)) ]
+        pts = [ vec(x, self._back_plate_y(z),z) for x, z in pts2d ]
+        return [ *pts, du.flip_x(pts[0]) ]
+
+    @cached_property
+    def back_plate_edge(self):
+        pt0 = self.back_plate_left_point
         pt2 = du.flip_x(pt0)
-        pt1 = self.BackPlateCenterPoint
+        pt1 = self.back_plate_center_point
 
         # Step 1 — intersect the two surfaces at shape level
         # (assuming you have Face objects for both)
-        section = self.BibCone.section(self.sfc_back_plate)
+        section = self.bib_cone.section(self.sfc_back_plate)
         edges = section.Edges   # list of intersection curve edges
 
         # Step 2 — find the edge that passes through pt1
@@ -295,93 +154,142 @@ class Model:
 
         # Step 3 — trim to [pt0, pt2] along that edge
         curve = target_edge.Curve
-
-        u0 = curve.parameter(pt0)
-        u2 = curve.parameter(pt2)
-
-        return Part.Edge(curve, u0, u2)
+        return Part.Edge(curve, curve.parameter(pt0), curve.parameter(pt2))
 
     @cached_property
     def bib_edge(self):
-        pt0, pt1, pt2 = self.bib_points
+        pt0, pt1, pt2 = self.bib_pts
 
         # Step 1 — intersect the two surfaces at shape level
         # (assuming you have Face objects for both)
-        section = self.BibCone.section(self.sfc_back_plate.toShape())
+        section = self.bib_cone.section(self.sfc_back_plate.toShape())
 
         # Step 2 — find the edge that passes through pt1
         edges = [ e for e in section.Edges if du.point_on_edge(pt1, e) ]
 
-        print("edges", len(edges) )
-        target_edge = edges[0]
-
         # Step 3 — trim to [pt0, pt2] along that edge
-        curve = target_edge.Curve
-
-        u0 = curve.parameter(pt0)
-        u2 = curve.parameter(pt2)
-
-        return Part.Edge(curve, u0, u2)
+        curve = edges[0].Curve
+        return Part.Edge(curve, curve.parameter(pt0), curve.parameter(pt2))
 
     @cached_property
-    def BibCone(self):
+    def sfc_bibroni(self):
+        """Face on sfc_bib bounded by:
+        - back edge : bib_cone ∩ sfc_back_plate  (trimmed to where the side edges start)
+        - left/right: bib_cone ∩ diffuser_base
+        - front edge: bezier on sfc_bib joining the two open front endpoints
+        All edges are expressed as 2-D curves on sfc_bib so the wire is guaranteed connected.
+        """
+        section   = self.bib_cone.section(self.diffuser_base)
+        all_edges = section.Edges
+
+        left_edge  = next(e for e in all_edges if e.CenterOfMass.x < 0)
+        right_edge = next(e for e in all_edges if e.CenterOfMass.x > 0)
+
+        # Orient each side edge so its first point is the back (closer to the back plate)
+        axis = self.sfc_back_plate.Axis
+        pos  = self.sfc_back_plate.Position
+        def dist_bp(pt): return abs(axis.dot(pt - pos))
+        def orient_back_first(e):
+            fp, lp = e.valueAt(e.FirstParameter), e.valueAt(e.LastParameter)
+            return e if dist_bp(fp) < dist_bp(lp) else du.reverse_edge(e)
+
+        left_edge  = orient_back_first(left_edge)
+        right_edge = orient_back_first(right_edge)
+
+        pt_bl = left_edge.valueAt(left_edge.FirstParameter)   # back-left
+        pt_br = right_edge.valueAt(right_edge.FirstParameter) # back-right
+        pt_fl = left_edge.valueAt(left_edge.LastParameter)    # front-left
+        pt_fr = right_edge.valueAt(right_edge.LastParameter)  # front-right
+
+        uv = self.sfc_bib.parameter  # 3-D point → (u, v) on sfc_bib
+
+        # Back edge: trim bib_edge to [pt_bl, pt_br], sample in UV to stay on sfc_bib
+        bib_e  = self.bib_edge
+        p_bl_u = bib_e.Curve.parameter(pt_bl)
+        p_br_u = bib_e.Curve.parameter(pt_br)
+        lo, hi = sorted([p_bl_u, p_br_u])
+        back_uvs = (
+            [uv(pt_bl)]
+            + [uv(bib_e.Curve.value(t)) for t in du.linspace(lo, hi, 8)[1:-1]]
+            + [uv(pt_br)]
+        )
+
+        # Side edge UV lists (first point = back, last point = front)
+        def edge_uvs(e, n=12): return [uv(pt) for pt in e.discretize(n)]
+
+        uv_fr  = uv(pt_fr)
+        uv_fl  = uv(pt_fl)
+        uv_mid = tuple((a + b) / 2 for a, b in zip(uv_fr, uv_fl))
+
+        # All four edges as 2-D beziers on sfc_bib → endpoints guaranteed to match
+        wire = Part.Wire([
+            du.bez2d(back_uvs).toShape(self.sfc_bib),                            # back  L→R
+            du.bez2d(edge_uvs(right_edge)).toShape(self.sfc_bib),                # right B→F
+            du.bez2d([uv_fr, uv_mid, uv_fl]).toShape(self.sfc_bib),             # front R→L
+            du.bez2d(list(reversed(edge_uvs(left_edge)))).toShape(self.sfc_bib), # left  F→B
+        ])
+        face = Part.Face(self.sfc_bib, wire)
+        face.validate()
+        face.check()
+        return face
+
+    @cached_property
+    def bib_cone(self):
         return self._bib_cone.cone
 
     @cached_property
-    def frontEllipse(self):
+    def front_ellipse(self):
         e = Part.Ellipse()
-        zCenter, e.MajorRadius, e.MinorRadius = findEllipseParams(self.P.frontHeight*Z, self.PtDiffuserBottom, self.P.ellipseRatio)
+        zCenter, e.MajorRadius, e.MinorRadius = find_ellipse_params(self.P.frontHeight*Z, self.pt_diffuser_bottom, self.P.ellipseRatio)
         e.Location = zCenter * Z
         e.Axis = Y
         return e
 
     @cached_property
-    def ConeLimiterSideCurve(self):
-        sc = self.sideCurve()
-        pt0, pt1 = [ sc.valueAt(p) for p in sc.ParameterRange ]
+    def cone_limiter_side_curve(self):
+        sc = self.side_curve()
+        pt0, pt1 = map(sc.valueAt, sc.ParameterRange)
         y   = -300*Y
         f   = Part.Face(Part.Wire([ Part.makeLine(y + pt0.z*Z, pt0), sc, Part.makeLine(pt1, y + pt1.z*Z), Part.makeLine(y + pt1.z*Z, y + pt0.z*Z)  ]))
         ext = 600*X
         return du.thicken(f, ext)
 
+    @cached_property
+    def front_rim(self):
+        return self.front_rim_side_curve
 
     @cached_property
-    def FrontRim(self):
-        return self.FrontRimSideCurve
+    def cone_limiter(self):
+        return self.cone_limiter_side_curve
 
     @cached_property
-    def ConeLimiter(self):
-        return self.ConeLimiterSideCurve
-
-    @cached_property
-    def FrontRimSideCurve(self):
-        sc = self.sideCurve()
+    def front_rim_side_curve(self):
+        sc = self.side_curve()
         sc.translate(300*X)
-        proj = self.Cone.makeParallelProjection(sc, -X)
+        proj = self.cone.makeParallelProjection(sc, -X)
         e = proj.SubShapes[0].Edges[0]
-        pts = e.discretize(50)
 
-        # points are from -x to x
-        if pts[0].x > pts[-1].x:
-            pts.reverse()
-        return Part.BSplineCurve(pts).toShape()
+        fpt, lpt = map(e.valueAt, e.ParameterRange)
+        if fpt.x > lpt.x:
+            return du.reverse_edge(e)
+        return e
 
     @cached_property
-    def BackPlateBlock(self):
+    def back_plate_block(self):
         """Builds the solid block that cuts the back plate."""
         depth = 600
-        shp = self.sfc_back_plate
-        uMin, uMax, vMin, vMax = shp.ParameterRange
-        return shp.extrude(depth * shp.normalAt(du.lerp(uMin, uMax, 0.5), du.lerp(vMin, vMax, 0.5)))
+        shp = self.sfc_back_plate.toShape()
+        u_min, u_max, v_min, v_max = shp.ParameterRange
+        return shp.extrude(depth * shp.normalAt(du.lerp(u_min, u_max, 0.5), du.lerp(v_min, v_max, 0.5)))
 
-    def sideCurve(self):
-        return Part.BSplineCurve(self.sideCurvePts()).toShape()
+    def side_curve(self):
+        return Part.BSplineCurve(self.side_curve_pts()).toShape()
 
-    def sideCurvePts(self):
-        pt0 = self.PtDiffuserTop
-        pt1 = (1*self.PtDiffuserBottom).scale(0,1,1)
+    def side_curve_pts(self):
+        pt0 = self.pt_diffuser_top
+        pt1 = (1*self.pt_diffuser_bottom).scale(0,1,1)
         # top front of the diffuser
-        cone_dir = du.angleVec(self.P.diffuserConeAngle, Y, Z)
+        cone_dir = du.angle_vec(self.P.diffuserconeAngle, Y, Z)
         ptFront = pt0 + (self.P.frontHeight - pt0.z)/cone_dir.z * cone_dir
 
         # curve going slightly down
@@ -389,22 +297,22 @@ class Model:
         pt1d = pt1 - down*Z
         ptfd = ptFront.y*Y + pt1d.z*Z
         return [pt1,
-                *du.lerp_list(pt1d,ptfd,[0.3,0.7]),
-                du.lerp(ptfd,ptFront,0.48),
-                du.lerp(ptfd, ptFront, 0.72)-50*Y,
-                du.lerp(ptfd,ptFront,0.9),
-                ptFront, ptFront + 200 *Z ]
+            *du.lerp_list(pt1d,ptfd,[0.3,0.7]),
+            du.lerp(ptfd,ptFront,0.48),
+            du.lerp(ptfd, ptFront, 0.72)-50*Y,
+            du.lerp(ptfd,ptFront,0.9),
+            ptFront, ptFront + 200 *Z ]
 
     @cached_property
-    def DiffuserBase(self):
+    def diffuser_base(self):
         """The main diffuser shape, cut by the ellipse and bottom block."""
-        return self.Cone.common(self.ConeLimiter).cut(self.BackPlateBlock)
+        return self.cone.common(self.cone_limiter).cut(self.back_plate_block)
 
     @cached_property
-    def BackPlateRim(self):
-        s = self.sfc_back_plate.toShape().section(self.Cone)
+    def back_plate_rim(self):
+        s = self.sfc_back_plate.toShape().section(self.cone)
         e = s.SubShapes[0]
-        pt = self.PtDiffuserBottom
+        pt = self.pt_diffuser_bottom
         p0 = e.Curve.parameter(pt)
         p1 = e.Curve.parameter(du.flip_x(pt))
         pts = [ e.valueAt(p) for p in du.linspace(p0,p1,40) ]
@@ -413,30 +321,31 @@ class Model:
         return Part.BSplineCurve(pts).toShape()
 
     @cached_property
-    def PtSideFlash(self):
+    def pt_side_flash(self):
         # Flash head profile points
-        return self.flashPoint + X*(self.P.flashHeadWidth/2 + self.P.flashHeadSpaceLeft)
+        return self.flash_point + X*(self.P.flashHeadWidth/2 + self.P.flashHeadSpaceLeft)
 
-    def coverBackRimPts(self):
+    def cover_back_rim_pts(self):
         w  = self.P.flashHeadWidth
 
         # Flash head profile points
-        pt0 = self.flashPoint - w/2*X - self.P.flashHeadSpaceLeft*X
+        pt0 = self.flash_point - w/2*X - self.P.flashHeadSpaceLeft*X
         pt1 = pt0 + self.P.flashHeadHeight*Z 
         pt2 = pt1 + self.P.flashHeadSpaceUp*Z 
-        pts = du.lerp_list(pt0,pt1,[0,0.3,0.6,0.8,0.8,1,1,1,1]) + du.lerp_list(pt2, du.flip_x(pt2),[0, 0.5]) 
+        # pts = du.lerp_list(pt0,pt1,[0,0.3,0.6,0.8,0.8,1,1,1,1]) + du.lerp_list(pt2, du.flip_x(pt2),[0, 0.5]) 
+        pts = [ *map(du.lerp_fn(pt0,pt1),[0,0.3,0.6,0.8,0.8,1,1,1,1]),  *map(du.lerp_fn(pt2, du.flip_x(pt2)),[0, 0.5]) ]
 
-        return pts + [ du.flip_x(p) for p in pts[:-1][::-1]]
+        return [*pts, *map(du.flip_x, pts[:-1][::-1]) ]
 
     @cached_property
     def cover_back_rim(self):
         """Builds the profile curve for the flash head rim."""
-        return Part.BSplineCurve(self.coverBackRimPts()).toShape()
+        return Part.BSplineCurve(self.cover_back_rim_pts()).toShape()
 
     @cached_property
-    def CoverBase(self):
+    def cover_base(self):
         """Creates the main cover ruled surface, cut by the back plate block."""
-        face = Part.makeRuledSurface(self.cover_back_rim, self.FrontRim)
+        face = Part.makeRuledSurface(self.cover_back_rim, self.front_rim)
         u_min, u_max, v_min, v_max = face.ParameterRange
         n = 50
 
@@ -453,15 +362,12 @@ class Model:
             return Part.BSplineCurve(pts).toShape()
 
         # Rule lerp the clean back edge and the offset front edge
-        return Part.makeRuledSurface(
-            get_boundary_curve(v_min, False),
-            get_boundary_curve(v_max, True)
-        )
+        return Part.makeRuledSurface(get_boundary_curve(v_min, False), get_boundary_curve(v_max, True))
 
-    def diffuserFrontTab(self, ps):
-        e = du.sub_edge(self.FrontRim, ps)
-        depths = [k*self.P.diffuserFrontTabDepth for k in [0.3,-1]]
-        return dt.tabFaceCurved(e, self.Cone.Surface, depths)
+    def diffuser_front_tab(self, ps):
+        e = du.sub_edge(self.front_rim, ps)
+        depths = ( k*self.P.diffuser_front_tabDepth for k in (0.3,-1))
+        return dt.tabFaceCurved(e, self.cone.Surface, depths)
 
     @cached_property
     def bib(self):
@@ -471,145 +377,259 @@ class Model:
     def bib_mount(self):
         return self._bib.mount
 
+    def bib_xy_pt(self, x, y):
+        vz_probe      = 200 
+        raw_pts, _ = self.sfc_bib.intersect(Part.makeLine( vec(x,y, - vz_probe), vec(x,y,vz_probe)).Curve)
+        int_pts    = sorted([vec(p.X, p.Y, p.Z) for p in raw_pts], key=lambda p: p.z)
+        return int_pts[0]
+
+
     @cached_property
     def _bib(self):
         # ── 1. Bib face on the bib-cone surface ───────────────────────────────
-        edge              = self.bib_edge
-        u_left, u_right   = edge.ParameterRange
-        pt_left, pt_right = (edge.valueAt(u) for u in (u_left, u_right))
+        edge            = self.bib_edge
+        u_left, u_right = edge.ParameterRange
+        pt_left         = edge.valueAt(edge.FirstParameter) 
 
+        y_far    = 150
+        x_spread = 50
 
-        def bib_xy_uv(pt):
-            vz_probe      = 200 * Z
-            raw_pts, _ = self.sfc_bib.intersect(Part.makeLine(pt - vz_probe, pt + vz_probe).Curve)
-            int_pts    = sorted([vec(p.X, p.Y, p.Z) for p in raw_pts], key=lambda p: p.z)
-            return self.sfc_bib.parameter(int_pts[0])
-
-        if False:
-            # Control points for the "back" arch of the bib (arching away along +Y)
-            y_near, y_far = 100, 120
-            x_spread      = 50
-            back_ctrl_pts = [
-                pt_right,
-                pt_right + y_near * Y + x_spread * X,
-                pt_right + y_far  * Y + x_spread * X,
-                pt_left  + y_far  * Y - x_spread * X,
-                pt_left  + y_near * Y - x_spread * X,
-                pt_left,
-            ]
-
-            # Project each control point onto the bib-cone surface along Z; take lowest hit
-            vz_probe      = 200 * Z
-            back_ctrl_uvs = [ bib_xy_uv(pt) for pt in back_ctrl_pts ]
-        else:
-            y_far       = 150
-            x_spread    = 50
-
-            uv_left_far = bib_xy_uv(pt_left  + y_far  * Y - x_spread * X)
-            uv_center_far = bib_xy_uv( y_far  * Y)
-            uv_center     = self.sfc_bib.parameter(edge.valueAt((u_left+u_right)/2))
-            uv_left  = self.sfc_bib.parameter(pt_left)
-
-            def get_uv(uvn):
-                un,vn = uvn
-                return du.lerp_tuple(
-                    du.lerp_tuple(uv_center,uv_left,un),
-                    du.lerp_tuple(uv_center_far,uv_left_far,un),
-                    vn
-                )
-
-            # symmetry
-            uvs = list(map(get_uv, ((1,0), (1.2,0.2), (1,0.7), (1,1), (0.7,1))))
-            # uvs = [ uv_left, *du.lerp_tuple_list(uv_left_far, uv_center_far, (0, 0.2, 0.8)) 
-            uvs += [
-                self.sfc_bib.parameter(du.flip_x(self.sfc_bib.value(*uv))) for uv in uvs[::-1]
-            ]
-
-            back_ctrl_uvs = uvs[::-1]
-
-        w        = Part.Wire([edge, du.bez2d(back_ctrl_uvs).toShape(self.sfc_bib)])
-        bib = Part.Face(self.sfc_bib, w.reversed())
-        bib.validate()
-        bib.check()
-
-        # ── 2. Mount plate with three connecting flaps ────────────────────────
-        axis = self.sfc_back_plate.Axis
-
-        flap_width       = 12   # width of each connecting flap along the edge
-        flap_height      = 20   # how far each flap extends from the edge
-        snap_hole_offset = 12   # distance of the snap hole from the edge along the flap
-
-        # Arc-length distances from the left end marking the three flap boundaries:
-        #   indent | left flap | gap | center flap | gap | right flap | indent
-        edge_indent      = 10
-        flap_bound_dists = (
-            edge_indent,
-            edge_indent + flap_width,
-            (edge.Length - flap_width) / 2,
-            (edge.Length + flap_width) / 2,
-            edge.Length - flap_width - edge_indent,
-            edge.Length - edge_indent,
+        uv_left_far, uv_center_far, uv_center, uv_left = map(
+            self.sfc_bib.parameter,
+            (
+                self.bib_xy_pt(pt_left.x - x_spread, y_far),
+                self.bib_xy_pt(0, y_far),
+                edge.valueAt((u_left + u_right) / 2), 
+                pt_left
+            )
         )
-        u_left_start, u_left_end, u_center_start, u_center_end, u_right_start, u_right_end = (
-            edge.Curve.parameterAtDistance(d, u_left) for d in flap_bound_dists
+
+        def get_uv(uvn):
+            un, vn = uvn
+            return du.lerp_tuple(
+                du.lerp_tuple(uv_center, uv_left, un),
+                du.lerp_tuple(uv_center_far, uv_left_far, un),
+                vn
+            )
+
+        # left edge
+        uvs      = [get_uv(pt) for pt in ((1, 0), (0.8, 0.35), (1, 0.7), (1, 1), (0.7, 1))]
+        mirrored = [self.sfc_bib.parameter(du.flip_x(self.sfc_bib.value(*uv))) for uv in uvs]
+        uvs      = [*uvs, *reversed(mirrored)]
+
+        front_edge = du.bez2d(uvs[::-1]).toShape(self.sfc_bib)
+
+        wire       = Part.Wire([edge, front_edge ]).reversed()
+
+        face  = Part.Face(self.sfc_bib, wire)
+        face.validate()
+        face.check()
+
+        # ── 2. Mount plate with shoulder flaps ────────────────────────────────
+        mount_axis = self.sfc_back_plate.Axis
+
+        flap_width       = 18   # width of each shoulder flap along the edge
+        flap_height      = 18   # how far each flap extends inward from the edge
+        snap_hole_offset = 10   # distance of the snap hole centre from the edge
+
+        # Mount edge: intersection of bib_face with a plane shifted inward by snapThickness
+        mount_plane = Part.Plane(
+            self.sfc_back_plate.Position - self.P.snapThickness * mount_axis,
+            mount_axis
         )
-        u_mid  = (u_left + u_right) / 2
-        pt_mid = edge.valueAt(u_mid)
+        mount_edge = mount_plane.toShape().section(face).Edges[0]
 
-        # Mount-plate outline: left-side half mirrored about X = 0
-        pt_plate_ref = pt_mid + (flap_height + 3) * X.cross(axis)
-        plate_half   = [
-            pt_left,
-            pt_left - 20 * X,
-            vec(pt_left.x - 20, pt_plate_ref.y, pt_plate_ref.z),
-        ]
-        plate_pts = plate_half + list(map(du.flip_x, reversed(plate_half)))
 
-        # Mount boundary: alternating curved arc / straight chord along the edge
-        u_bounds    = (u_left, u_left_start, u_left_end, u_center_start, u_center_end, u_right_start, u_right_end, u_right)
-        mount_edges = [
-            Part.makeLine(edge.valueAt(u_a), edge.valueAt(u_b)) if i % 2 == 1
-            else Part.Edge(edge.Curve, u_a, u_b)
-            for i, (u_a, u_b) in enumerate(zip(u_bounds, u_bounds[1:]))
-        ]
-        w          = Part.Wire([*mount_edges, *Part.makePolygon(plate_pts[::-1]).Edges])
-        mount = Part.Face(w)
+        # Parameters on `edge` spanning the inner (non-flap) section
+        fw = flap_width + 5
+        fw2 = flap_width + 12
 
-        # Three connecting flaps: center, left-shoulder, right-shoulder
-        for u_a, u_b in ((u_center_start, u_center_end), (u_left_start, u_left_end), (u_right_start, u_right_end)):
-            u_flap_mid = (u_a + u_b) / 2
-            normal     = self.sfc_bib.normal(*self.sfc_bib.parameter(edge.valueAt(u_flap_mid)))
-            v_flap_dir = normal.cross(-edge.tangentAt(u_flap_mid))
 
-            pt_a, pt_b   = (edge.valueAt(u) for u in (u_a, u_b))
+        # Parameters on `mount_edge` bounding the two shoulder flaps
+        edge_at_dist = du.param_at_dist(edge)
+        mount_edge_at_dist = du.param_at_dist(mount_edge)
+
+        # new wire
+        def on_bib(*pts):
+            return du.bez2d(map(self.sfc_bib.parameter, pts)).toShape(self.sfc_bib)
+
+        u_ml  = mount_edge.FirstParameter
+        u_ml1 = mount_edge_at_dist(flap_width)
+        u_mr1 = mount_edge_at_dist(flap_width, True)
+        u_mr  = mount_edge.LastParameter
+        u_el  = edge_at_dist(fw2)
+        u_er  = edge_at_dist(fw2, True)
+
+        me, e, fe = mount_edge, edge, front_edge
+
+        wire = Part.Wire([
+            Part.Edge(me.Curve, u_ml,  u_ml1),
+            on_bib(me.valueAt(u_ml1), e.valueAt(edge_at_dist(fw)),       e.valueAt(u_el)),
+            Part.Edge(e.Curve,  u_el,  u_er),
+            on_bib(e.valueAt(u_er),   e.valueAt(edge_at_dist(fw, True)), me.valueAt(u_mr1)),
+            Part.Edge(me.Curve, u_mr1, u_mr),
+            Part.Edge(fe.Curve, fe.Curve.parameter(me.valueAt(u_mr)),
+            fe.Curve.parameter(me.valueAt(u_ml))),
+        ])
+
+        # new face
+        face = Part.Face(self.sfc_bib, wire.reversed())
+        face.validate()
+        face.check()
+
+        # Two shoulder flaps: left and right, folded inward
+        snap_holes = []
+        shoulder_spans = [ (0, flap_width, False), (flap_width, 0, True), ]
+        flaps = []
+        for dist_a, dist_b, from_end in shoulder_spans:
+            u_a = mount_edge_at_dist(dist_a, from_end)
+            u_b = mount_edge_at_dist(dist_b, from_end)
+            
+            pt_a, pt_b = map(mount_edge.valueAt, (u_a, u_b))
+
+            v_flap_dir = mount_axis.cross(pt_b - pt_a).normalize()  # inward
+
             pt_a2, pt_b2 = (pt + flap_height * v_flap_dir for pt in (pt_a, pt_b))
 
-            w    = Part.makePolygon([pt_a, pt_a2, pt_b2, pt_b, pt_a])
-            w    = du.roundCorners(w, [pt_a2, pt_b2], 3)
-            flap = Part.Face(w).cut([Part.makeSphere(0.5, pt) for pt in (pt_a, pt_b)])
+            flap_wire = Part.makePolygon([pt_b, pt_b2, pt_a2, pt_a])
+            flap_wire = du.round_corners(flap_wire, [pt_a2, pt_b2], 8)
+            flap_wire = Part.Wire([Part.Edge(mount_edge.Curve, u_a, u_b), *flap_wire.Edges])
+            flap      = Part.Face(flap_wire)
 
-            pt_snap_hole = (pt_a + pt_b) / 2 + snap_hole_offset * v_flap_dir
-            fc = Part.Face(Part.Wire(Part.makeCircle(self.P.snapHoleDia, pt_snap_hole, normal)))
+            pt_hole = du.lerp(pt_a, pt_b, 0.5) + snap_hole_offset * v_flap_dir
+            r       = self.P.snapHoleDia / 2
+            hole    = Part.Face(Part.Wire(Part.makeCircle(r, pt_hole, mount_axis)))
+            hole    = hole.extrude(10 * mount_axis).translate(-5 * mount_axis)
 
-            mount = mount.fuse(flap.cut(fc))
-            bib   = bib.cut(fc.extrude(8 * normal).translate(-4 * normal))
+            flaps.append(flap.cut([hole, *(Part.makeSphere(0.5, pt) for pt in (pt_a, pt_b))]))
+            snap_holes.append(hole)
 
-        return BibData(bib=bib, mount=mount)
+        return BibData(bib=Part.Compound([face, *flaps]), snap_holes=snap_holes, face=face)
+
+    @cached_property
+    def _smazat_bib(self):
+        # ── 1. Bib face on the bib-cone surface ───────────────────────────────
+        edge            = self.bib_edge
+        u_left, u_right = edge.ParameterRange
+        pt_left, _      = (edge.valueAt(u) for u in (u_left, u_right))
+
+        y_far    = 150
+        x_spread = 50
+
+        uv_left_far   = self.bib_xy_uv(pt_left + y_far * Y - x_spread * X)
+        uv_center_far = self.bib_xy_uv(y_far * Y)
+        uv_center     = self.sfc_bib.parameter(edge.valueAt((u_left + u_right) / 2))
+        uv_left       = self.sfc_bib.parameter(pt_left)
+
+        def get_uv(uvn):
+            un, vn = uvn
+            return du.lerp_tuple(
+                du.lerp_tuple(uv_center, uv_left, un),
+                du.lerp_tuple(uv_center_far, uv_left_far, un),
+                vn
+            )
+
+        # symmetry
+        uvs = list(map(get_uv, ((1, 0), (0.8, 0.35), (1, 0.7), (1, 1), (0.7, 1))))
+        uvs = [
+            *uvs,
+            *reversed([self.sfc_bib.parameter(du.flip_x(self.sfc_bib.value(*uv))) for uv in uvs])
+        ]
+
+        bib_front_edge = du.bez2d(uvs[::-1]).toShape(self.sfc_bib)
+        bib_wire       = Part.Wire([edge, bib_front_edge])
+        bib_face       = Part.Face(self.sfc_bib, bib_wire.reversed())
+        bib_face.validate()
+        bib_face.check()
+
+        # ── 2. Mount plate with shoulder flaps ────────────────────────────────
+        mount_axis = self.sfc_back_plate.Axis
+
+        flap_width       = 18   # width of each shoulder flap along the edge
+        flap_height      = 18   # how far each flap extends inward from the edge
+        snap_hole_offset = 10   # distance of the snap hole centre from the edge
+
+        # Mount edge: intersection of bib_face with a plane shifted inward by snapThickness
+        mount_plane = Part.Plane(
+            self.sfc_back_plate.Position - self.P.snapThickness * mount_axis,
+            mount_axis
+        )
+        mount_edge = mount_plane.toShape().section(bib_face).Edges[0]
+
+
+        edge_at_dist = du.param_at_dist(edge)
+
+        # Parameters on `edge` spanning the inner (non-flap) section
+        fw = flap_width + 5
+        fw2 = flap_width + 12
+
+
+        # Parameters on `mount_edge` bounding the two shoulder flaps
+        u_mount_left, u_mount_right = mount_edge.ParameterRange
+        u_left_shoulder_end    = mount_edge.Curve.parameterAtDistance(flap_width, u_mount_left)
+        u_right_shoulder_start = mount_edge.Curve.parameterAtDistance(
+            mount_edge.Length - flap_width, u_mount_left
+        )
+
+        mount_wire = Part.Wire([
+            Part.Edge(mount_edge.Curve, u_mount_left, u_left_shoulder_end),
+            du.bez2d(map(self.sfc_bib.parameter, 
+                (
+                    mount_edge.valueAt(u_left_shoulder_end), 
+                    edge.valueAt( edge_at_dist(fw) ),
+                    edge.valueAt( edge_at_dist(fw2) ),
+                ))).toShape(self.sfc_bib),
+            Part.Edge(edge.Curve, edge_at_dist(fw2), edge_at_dist(fw2, True)),
+            du.bez2d(map(self.sfc_bib.parameter, (
+                edge.valueAt( edge_at_dist(fw2, True) ),
+                edge.valueAt( edge_at_dist(fw, True) ),
+                mount_edge.valueAt(u_right_shoulder_start)
+            ))).toShape(self.sfc_bib),
+            Part.Edge(mount_edge.Curve, u_right_shoulder_start, u_mount_right),
+            Part.Edge(
+                bib_front_edge.Curve,
+                bib_front_edge.Curve.parameter(mount_edge.valueAt(u_mount_right)),
+                bib_front_edge.Curve.parameter(mount_edge.valueAt(u_mount_left))
+            )
+        ])
+        mount_face = Part.Face(self.sfc_bib, mount_wire.reversed())
+        mount_face.validate()
+        mount_face.check()
+
+        # Two shoulder flaps: left and right, folded inward
+        snap_holes = []
+        shoulder_spans = [
+            (u_mount_left, u_left_shoulder_end),
+            (u_right_shoulder_start, u_mount_right),
+        ]
+        for u_a, u_b in shoulder_spans:
+            pt_a, pt_b = map(mount_edge.valueAt, (u_a, u_b))
+
+            v_flap_dir = mount_axis.cross(pt_b - pt_a).normalize()  # inward
+
+            pt_a2, pt_b2 = (pt + flap_height * v_flap_dir for pt in (pt_a, pt_b))
+
+            flap_wire = Part.makePolygon([pt_b, pt_b2, pt_a2, pt_a])
+            flap_wire = du.round_corners(flap_wire, [pt_a2, pt_b2], 8)
+            flap_wire = Part.Wire([Part.Edge(mount_edge.Curve, u_a, u_b), *flap_wire.Edges])
+            flap      = Part.Face(flap_wire).cut([Part.makeSphere(0.5, pt) for pt in (pt_a, pt_b)])
+
+            pt_hole = du.lerp(pt_a, pt_b, 0.5) + snap_hole_offset * v_flap_dir
+            r       = self.P.snapHoleDia / 2
+            hole    = Part.Face(Part.Wire(Part.makeCircle(r, pt_hole, mount_axis)))
+            hole    = hole.extrude(10 * mount_axis).translate(-5 * mount_axis)
+
+            mount_face = mount_face.fuse(flap.cut(hole))
+            snap_holes.append(hole)
+
+        return BibData(bib=mount_face, mount=mount_face, snap_holes=snap_holes, face=bib_face)
 
     def unwrap(self, shp):
         unwrapped = du.unwrapShape(self.doc, shp )
-        rotateUntil(unwrapped, du.linspace(0,180,30) )
+        rotate_until(unwrapped, du.linspace(0,180,30) )
         return unwrapped
 
-    @cached_property
-    def DiffuserFrontTabs(self):
-        return [ self.diffuserFrontTab(ps) for ps in self.front_tab_params ]
-
-    @cached_property
-    def DiffuserBackPlateTabs(self):
-        return [ self.diffuserBackPlateTab(ps) for ps in self.back_plate_tab_params ]
-
-    def diffuserBackPlateTab(self, ps):
+    def diffuser_back_plate_tab(self, ps):
         def tabCut(e, right):
             if right:
                 target_dist = e.Length - self.P.tabCutWidth
@@ -619,43 +639,46 @@ class Model:
                 u_min = du.lerp(*e.ParameterRange, -0.1)
                 u_max = e.Curve.parameterAtDistance(self.P.tabCutWidth, e.FirstParameter)
 
-            return dt.tabFaceRec(Part.Edge(e.Curve, u_min, u_max), self.Cone.Surface,  [0, -1.1*self.P.diffThickness])
+            return dt.tabFaceRec(Part.Edge(e.Curve, u_min, u_max), self.cone.Surface,  [0, -1.1*self.P.diffThickness])
 
-        e = du.sub_edge(self.BackPlateRim, ps)
-        depths = [k*self.P.diffuserBackPlateTabDepth for k in [0.2, -1]]
-        tab = dt.tabFaceCurved(e, self.Cone.Surface, depths )
+        e = du.sub_edge(self.back_plate_rim, ps)
+        depths = [k*self.P.diffuserback_plateTabDepth for k in [0.2, -1]]
+        tab = dt.tabFaceCurved(e, self.cone.Surface, depths )
         return tab.cut([ tabCut(e,False), tabCut(e,True) ]) 
 
-
     @cached_property
-    def DiffuserFrontInnerTabs(self):
+    def diffuser_front_inner_tabs(self):
         ftp = self.front_tab_params
         depths = [k*self.P.diffuserInnerTabDepth for k in [-1,0.3] ]
-        return [ dt.tabInterFace(self.FrontRim, self.Cone.Surface, p,q, depths) for p,q in zip(ftp,ftp[1:]) ]
+        return [ dt.tabInterFace(self.front_rim, self.cone.Surface, p,q, depths) for p,q in zip(ftp,ftp[1:]) ]
 
     @cached_property
-    def DiffuserPreventTearCuts(self):
+    def diffuser_prevent_tear_cuts(self):
         # omit first and last parameter (u)
         us = [u for p in self.front_tab_params for u in p][1:-1]
-        return [ du.circle2d(self.Cone.Surface, self.FrontRim.valueAt(u), self.P.preventTearRadius) for u in us]
+        return [ du.circle2d(self.cone.Surface, self.front_rim.valueAt(u), self.P.preventTearRadius) for u in us]
 
     @cached_property
-    def Diffuser(self):
-        return self.DiffuserBase.fuse(self.DiffuserFrontTabs + self.DiffuserBackPlateTabs + self.DiffuserFrontInnerTabs).cut(self.DiffuserPreventTearCuts)
+    def diffuser(self):
+        return self.diffuser_base.fuse([
+            *map(self.diffuser_front_tab, self.front_tab_params), 
+            *map(self.diffuser_back_plate_tab, self.back_plate_tab_params), 
+            *self.diffuser_front_inner_tabs,
+            ]).cut(self.diffuser_prevent_tear_cuts)
 
     @cached_property
-    def BackPlateSideLines(self):
+    def back_plate_pts(self):
         # flaps by the base
-        ps = self.CoverBase.ParameterRange
-        return [ [ self.CoverBase.valueAt(u,v) for v in ps[2:] ] for u in ps[:2] ]
+        u_min, u_max, v_min, v_max = self.cover_base.ParameterRange
+        return tuple( tuple( self.cover_base.valueAt(u,v) for v in (v_min, v_max) ) for u in (u_min, u_max) )
 
     @cached_property
-    def LensCut(self):
-        # return self.LensCutSmooth()
-        return self.LensCutExperimental()
+    def lens_cut(self):
+        # return self.lens_cut_smooth()
+        return self.lens_cut_experimental()
 
-    def LensCutSmooth(self):
-        ll, lr = self.BackPlateSideLines
+    def lens_cut_smooth(self):
+        ll, lr = self.back_plate_pts
 
         l1, l0 = [ (1*pt).scale(1,0,1) for pt in ll ]
 
@@ -663,21 +686,11 @@ class Model:
         v = (l1-l0).normalize()
 
         if self.P.backPlateCutShallow:
-            pts = [
-                l0, 
-                l0 - 25*v,
-                l0 - 25*v  + 36*X,
-                l0 - 15*v  + 45*X,
-            ]
-            ptsCenter = [ r*du.angleVec(a,X,0.4*Z) for a in du.linspace(170, 10, 8) ]
+            pts = [ l0, l0 - 25*v, l0 - 25*v  + 36*X, l0 - 15*v  + 45*X, ]
+            ptsCenter = [ r*du.angle_vec(a,X,0.4*Z) for a in du.linspace(170, 10, 8) ]
         else:
-            pts = [
-                l0, 
-                l0 - 25*v,
-                l0 - 25*v  + 30*X,
-                l0 - 25*v  + 40*X,
-            ]
-            ptsCenter = [ r*du.angleVec(a,X,0.8*Z) for a in du.linspace(170, 10, 8) ]
+            pts = [ l0, l0 - 25*v, l0 - 25*v  + 30*X, l0 - 25*v  + 40*X, ]
+            ptsCenter = [ r*du.angle_vec(a,X,0.8*Z) for a in du.linspace(170, 10, 8) ]
         pts += ptsCenter + [ du.flip_x(pt) for pt in pts[::-1] ]
         bez = Part.BSplineCurve(pts).toShape()
 
@@ -687,19 +700,19 @@ class Model:
         f = Part.Face( Part.Wire([bez] + poly.Edges) )
         return f.extrude(200*Y).translate(-100*Y)
 
-    def LensCutExperimental(self):
+    def lens_cut_experimental(self):
         r = self.P.lensDia / 2
-        pts = [ r*du.angleVec(a,X,Z) for a in du.linspace(180, 0, 8) ]
+        pts = [ r*du.angle_vec(a,X,Z) for a in du.linspace(180, 0, 8) ]
 
-        pts = [ pts[0] + 200*du.angleVec(10,-Z,-X) ] + pts + [ pts[-1] + 200 *du.angleVec(10,-Z,X) ]
+        pts = [ pts[0] + 200*du.angle_vec(10,-Z,-X) ] + pts + [ pts[-1] + 200 *du.angle_vec(10,-Z,X) ]
         bez = Part.BSplineCurve(pts).toShape()
 
         w = Part.Wire([bez, Part.makeLine(pts[-1], pts[0]) ])
         f = Part.Face(w)
         return f.extrude(200*Y).translate(-100*Y)
 
-    def LensCutExperimental0(self):
-        ll, lr = self.BackPlateSideLines
+    def lens_cut_experimental0(self):
+        ll, lr = self.back_plate_pts
 
         # removing y by scale
         l1, l0 = [ (1*pt).scale(1,0,1) for pt in ll ]
@@ -707,7 +720,7 @@ class Model:
         r = self.P.lensDia / 2
         v = (l1-l0).normalize()
 
-        ptsCenter = [ r*du.angleVec(a,X,Z) for a in du.linspace(180, 0, 8) ]
+        ptsCenter = [ r*du.angle_vec(a,X,Z) for a in du.linspace(180, 0, 8) ]
 
         zBottom = (l0 - 35*v).z
 
@@ -742,57 +755,51 @@ class Model:
         f = Part.Face(w)
         return f.extrude(200*Y).translate(-100*Y)
 
-
     @cached_property
-    def BackPlate(self):
+    def back_plate(self):
         """Creates the shape of the back plate part."""
-        ll, lr  = self.BackPlateSideLines
+        pt0, pt1 = self.back_plate_pts[0]
+        v_down = (vec(0, pt1.y, pt1.z) - vec(0, pt0.y, pt0.z)).normalize()
 
-        pts = [*reversed(lr), *ll, lr[1]]
-        w = Part.makePolygon(pts)
-        # w = Part.Wire( Part.makePolygon(pts).Edges + [ self.BackPlateEdge ])
+        down1 = 8
+        down2 = 15 
+   
+        c = vec(0, self._back_plate_y(0), 0)
+        r = self.P.lensDia/2
+        # around the lens
+        pts_round = [ c + r* du.angle_vec(a, -X, -v_down) for a in du.linspace(0, 180, 20) ]
+        pts_round = [ pts_round[0]+10*v_down, *pts_round, pts_round[-1]+10*v_down ] 
+
+        pt2 = pt1 + down1*(pt1-pt0).normalize()
+        pt3 = pt2 + down2*v_down 
+        pt4 = vec(-r, pt3.y, pt3.z)
+
+        # pts_left = [pt0, pt1, pt2, pt3, pt4, pt4 + 5*(pt5-pt4).normalize() ]
+        pts_up = [pt0+5*X, pt0, pt0+5*(pt1-pt0).normalize()]
+        pts_left = [pt1, pt2, pt3, pt3+10*X]
+        pts_middle = [pt4-10*X,pt4, pt4-10*v_down]
+
+        w = Part.Wire(
+            du.connect_edges_with_lines([
+                Part.BSplineCurve(pts_up).toShape(), 
+                Part.BSplineCurve(pts_left).toShape(),
+                Part.BSplineCurve(pts_middle).toShape(),
+                Part.BSplineCurve(pts_round).toShape(),
+                Part.BSplineCurve(list(map(du.flip_x, reversed(pts_middle)))).toShape(),
+                Part.BSplineCurve(list(map(du.flip_x, reversed(pts_left)))).toShape(),
+                Part.BSplineCurve(list(map(du.flip_x, reversed(pts_up)))).toShape(),
+            ], True))
         f = Part.Face(w)
-        f = f.cut(self.LensCutExperimental())
         return f
 
-    def BackPlate0(self):
-        """Creates the shape of the back plate part."""
-        rim = 0 if not(self.P.coverConnectedByTabs) else 15
-
-
-        zbottom = 15
-        zbottom = 45
-        z2 = -self.P.lensDia/2 - zbottom 
-
-        pt1 = self.flashPoint - (self.P.flashHeadWidth/2 + self.P.flashHeadSpaceLeft)*X
-
-        orim = self.FrontRim
-        # pt0 = next((pt for pt in [orim.valueAt(p) for p in [orim.FirstParameter, orim.LastParameter]] if pt.x < 0))
-        pt0 = next((pt for pt in [orim.valueAt(p) for p in orim.ParameterRange] if pt.x < 0))
-        # Linearly interpolate to z2, then offset by rim*X
-        pt2 = pt1 + (pt0-pt1) * (z2-pt1.z)/(pt0.z-pt1.z) - rim*X
-
-        pt1 -= rim*X
-        pts = [pt2, pt1, du.flip_x(pt1), du.flip_x(pt2), pt2 ]
-        w = Part.makePolygon(pts)
-        Part.show(w, "w")
-        f = Part.Face(w).cut(self.LensCut)
-
-        if self.P.coverConnectedByTabs:
-            slots = []
-            for side in [0,1]:
-                slots += self.backPlateStitch(side).slots() 
-            f = f.cut(slots)
-
-        return f
-
-    def coverSideLine(self, i):
-        uvs = self.CoverBase.ParameterRange
-        return [ self.CoverBase.valueAt(uvs[i], v) for v in uvs[2:] ]
+    def cover_side_line(self, i):
+      u_min, u_max, v_min, v_max = self.cover_base.ParameterRange
+      u = (u_min, u_max)[i]
+      return [self.cover_base.valueAt(u, v) for v in (v_min, v_max)]
 
     # side 0 is left, side 1 is right
     def cover_fold(self, side):
-        pt0, pt1 = self.PtSideFlash, self.PtDiffuserBottomMargin
+        pt0, pt1 = self.pt_side_flash, self.pt_diffuser_bottom_margin
         if side==0:
             pt0 = du.flip_x(pt0)
             pt1 = du.flip_x(pt1)
@@ -822,7 +829,7 @@ class Model:
         if side==0:
             pts.reverse()
 
-        w = du.roundCorners(Part.makePolygon(pts), pc, 6)
+        w = du.round_corners(Part.makePolygon(pts), pc, 6)
         f2 = Part.Face(w)
 
         f = Part.makeCompound([f1, f2])
@@ -849,8 +856,8 @@ class Model:
             f = f.cut( Part.Solid(Part.Shell([c.toShape()])) )
         return f
 
-    def makeCoverHoles(self, mirror):
-        pt0, pt1 = self.PtSideFlash, self.PtDiffuserBottomMargin
+    def make_cover_holes(self, mirror):
+        pt0, pt1 = self.pt_side_flash, self.pt_diffuser_bottom_margin
         if mirror:
             pt0 = du.flip_x(pt0)
             pt1 = du.flip_x(pt1)
@@ -868,16 +875,15 @@ class Model:
         vpt1 = pt1 + v + v2/2 - 12*vt
 
         # holes to connect bottom with the cover
-        cyls = []
-        for pt in du.linspace(vpt0, vpt1, 2):
-            c = Part.makeCircle(self.P.snapHoleDia/2, pt, axis)
-            cyls.append(Part.Face(Part.Wire(c)).extrude(-12*axis))
-        return cyls
+        return [
+            Part.Face(Part.Wire(Part.makeCircle(self.P.snapHoleDia/2, pt, axis))).extrude(-12*axis)
+            for pt in du.linspace(vpt0, vpt1, 2)
+        ]
 
-    def back_plate_slot(self, ps):
+    def UNUSED_back_plate_slot(self, ps):
         sfc = self.sfc_back_plate
 
-        e = du.sub_edge(self.BackPlateRim, ps)
+        e = du.sub_edge(self.back_plate_rim, ps)
         e_thin = Part.Edge(e.Curve, *[du.edge_at_dist(e, self.P.tabCutWidth, from_end) for from_end in [False,True]]) 
 
         return Part.makeCompound([
@@ -891,17 +897,58 @@ class Model:
             *[ du.circle2d(sfc, e.valueAt(u), 0.3) for u in e.ParameterRange ]
         ])
 
+    def back_plate_slot(self, us):
+        sfc        = self.sfc_back_plate
+        plate_axis = sfc.Axis
+
+        slot_edge = Part.Edge(
+            self.back_plate_rim.Curve,
+            *map(du.lerp_fn(*self.back_plate_rim.ParameterRange), us)
+        )
+
+        tab_cut_width = 8
+        curve_radius  = 5
+        curve_steps   = 10
+        curve_angle   = math.degrees(tab_cut_width / curve_radius)
+
+        u_inner_start, u_inner_end = (
+            du.edge_at_dist(slot_edge, tab_cut_width, from_end)
+            for from_end in (False, True)
+        )
+
+        # Tangent step vectors for building the rounded ends
+        step_vec_start, step_vec_end = (
+            slot_edge.tangentAt(u).normalize() * tab_cut_width / curve_steps
+            for u in (u_inner_start, u_inner_end)
+        )
+
+        pts = Part.Edge(slot_edge.Curve, u_inner_start, u_inner_end).discretize(12)
+        for angle_step in du.linspace(0, curve_angle, curve_steps):
+            rot_end   = FreeCAD.Base.Rotation(plate_axis,  angle_step)
+            rot_start = FreeCAD.Base.Rotation(plate_axis, -angle_step)
+            pts.append(pts[-1] + rot_end.multVec(step_vec_end))
+            pts.insert(0, pts[0] - rot_start.multVec(step_vec_start))
+
+        curved_slot = Part.BSplineCurve(pts).toShape()
+
+        return Part.makeCompound([
+            #dt.slotFace(curved_slot, sfc, self.P.diffThickness),
+            dt.tabFaceRecTan(curved_slot, sfc, [-self.P.diffThickness/2, self.P.diffThickness/2]),
+            *[du.circle2d(sfc, curved_slot.valueAt(u), 0.3) for u in curved_slot.ParameterRange],
+        ])
+
     @cached_property
     def back_plate_complete(self):
         """The final back plate shape with cuts for the inner flaps."""
 
-        return self.BackPlate.cut([
-            *self.makeCoverHoles(False), 
-            *self.makeCoverHoles(True), 
+        return self.back_plate.cut([
+            *self.make_cover_holes(False), 
+            *self.make_cover_holes(True), 
             *map(self.back_plate_slot, self.back_plate_tab_params),
+            *self._bib.snap_holes,
         ])
 
-    def coverFlashFlap(self, side):
+    def cover_flash_flap(self, side):
         depth = 35
         heightFromBottom =  4
         heightFromTop     = 4
@@ -913,8 +960,8 @@ class Model:
         pts += [pts[1]-depth*Y,pts[0]-depth*Y,pts[0]]
 
         # "moving" to center (eliminate X)
-        pts = [ (1*pt).scale(0,1,1) for pt in pts ]
-        w = du.roundCorners(Part.makePolygon(pts), pts[2:4], 5)
+        pts = [ vec(0,pt.y,pt.z) for pt in pts ]
+        w = du.round_corners(Part.makePolygon(pts), pts[2:4], 5)
 
         sidevec = X * (100 if side == 1 else -100)
         cutter = Part.Face(w).extrude(sidevec)
@@ -925,47 +972,47 @@ class Model:
         strapMargin    = 5
         scutters = []
         for pt in du.lerp_list(pts[0], pts[1], [0.35, 0.65]):
-            spts = [ pt + j*strapThickness/2*Z - (strapMargin+i*strapWidth)*Y for i,j in [ [0,-1],[1,-1],[1,1], [0,1],[0,-1]]]
-            w = du.roundCorners(Part.makePolygon(spts), spts, 0.5)
+            spts = [ pt + j*strapThickness/2*Z - (strapMargin+i*strapWidth)*Y for i,j in [ (0,-1), (1,-1), (1,1), (0,1) , (0,-1) ]]
+            w = du.round_corners(Part.makePolygon(spts), spts, 0.5)
             scutters.append(Part.Face(w).extrude(sidevec))
 
         return cv.extrude(-(depth+10)*Y).common(cutter).cut(scutters)
 
     @cached_property
-    def Cover(self):
+    def cover(self):
         """Builds the cover with cuts for the flaps and other features."""
 
         # small spheres marking flash head corners
-        pt0 = self.flashPoint + self.P.flashHeadWidth/2*X
+        pt0 = self.flash_point + self.P.flashHeadWidth/2*X
         pt1 = pt0 + Z*(self.P.flashHeadHeight+2)
         flashMarks = [ Part.makeSphere(2.5).translate(pt) for pt in [pt0, pt1, du.flip_x(pt0), du.flip_x(pt1)] ]
 
         appendages = []
-        for side in [0,1]:
-            appendages.append( self.coverFlashFlap(side))
+        for side in (0, 1):
+            appendages.append( self.cover_flash_flap(side))
             if self.P.coverConnectedByTabs:
-                stitch = self.coverBackPlateStitch(side)
+                stitch = self.cover_back_plate_stitch(side)
                 appendages += stitch.tabs() + stitch.stopper_tabs()
             else:
                 appendages.append( self.cover_fold(side) )
 
-        return self.CoverBase.fuse(appendages).cut(self.CoverFrontSlots + flashMarks)
+        return self.cover_base.fuse(appendages).cut(self.cover_front_slots + flashMarks)
 
     @cached_property
-    def CoverFrontSlots(self):
+    def cover_front_slots(self):
         """Builds the cutting shapes for the cover front flaps."""
-        return [ dt.slotFace(du.sub_edge(self.FrontRim, ps), self.CoverBase.Surface, self.P.diffThickness) for ps in self.front_tab_params ]
+        return [ dt.slotFace(du.sub_edge(self.front_rim, ps), self.cover_base.Surface, self.P.diffThickness) for ps in self.front_tab_params ]
 
     @cached_property
-    def CoverLeft(self):
-        return self.coverPart(0)
+    def cover_left(self):
+        return self.cover_part(0)
 
     @cached_property
-    def CoverRight(self):
-        return self.coverPart(1)
+    def cover_right(self):
+        return self.cover_part(1)
 
     @cached_property
-    def FlashHead(self):
+    def flash_head(self):
         """Builds the box representing the flash head."""
         w = self.P.flashHeadWidth
         d = self.P.flashHeadDepth
@@ -975,79 +1022,78 @@ class Model:
         return box
 
     @cached_property
-    def PtDiffuserTop(self):
-        pt0 = Z * (self.P.lensDia/2)
-        pt = self.sfc_back_plate.intersect(Part.Line(pt0, pt0 + 100*Y))[0][0]
-        return vec(pt.X, pt.Y, pt.Z)
+    def pt_diffuser_top(self):
+        z = self.P.lensDia/2
+        return vec(0, self._back_plate_y(z), z)
 
     @cached_property
-    def PtDiffuserBottom(self):
-        pt1 = -self.P.lensDia/5 * Z + (45 + self.P.lensDia/2)*X
-        pt = self.sfc_back_plate.intersect(Part.Line(pt1, pt1 + 100*Y))[0][0]
-        return vec(pt.X, pt.Y, pt.Z)
+    def pt_diffuser_bottom(self):
+        x = 45 + self.P.lensDia/2
+        z = -self.P.lensDia/5 
+        return vec(x, self._back_plate_y(z), z)
 
     @cached_property
-    def PtDiffuserBottomMargin(self):
-        ptUp = self.PtSideFlash
-        ptBottom = self.PtDiffuserBottom
+    def pt_diffuser_bottom_margin(self):
+        ptUp = self.pt_side_flash
+        ptBottom = self.pt_diffuser_bottom
         return ptBottom + (ptBottom-ptUp).normalize()*self.P.coverFrontMargin
 
-    def showUnwrapped(self, pt0):
+    def show_unwrapped(self, pt0):
         W,H = 400,300
         pt1 = pt0+W*X  
         pt2 = pt1+H*Y
         pt3 = pt0+H*Y
         Part.show(Part.makePolygon([pt0,pt1,pt2,pt3,pt0]))
 
-        # self.CoverUnwrapped.rotate(O,Z,90)
+        # self.cover_unwrapped.rotate(O,Z,90)
 
-        bb = self.CoverUnwrapped.BoundBox
-        self.CoverUnwrapped.translate(pt0 +5 *X + 5*Y -X*bb.XMin-Y*bb.YMin)
-        Part.show(self.CoverUnwrapped, "cover-unwrapped")
+        bb = self.cover_unwrapped.BoundBox
+        self.cover_unwrapped.translate(pt0 +5 *X + 5*Y -X*bb.XMin-Y*bb.YMin)
+        Part.show(self.cover_unwrapped, "cover-unwrapped")
 
-        diff = self.DiffUnwrapped
+        diff = self.diff_unwrapped
         diff.rotate(O,Z,90)
         bb = diff.BoundBox
         diff.translate(pt0 + 5*Y + 525*X -X*bb.XMin-Y*bb.YMin)
         Part.show(diff, "diff-unwrapped")
 
-        bt = self.BackPlateUnwrapped
+        bt = self.back_plate_unwrapped
         bb = bt.BoundBox
         bt.translate(pt0 + 285*X + 343*Y -X*bb.XMin-Y*bb.YMin)
         Part.show(bt, "back-plate-unwrapped")
 
     def solids(self):
-        return [ self.Cover, self.backPlate_complete, self.Diffuser, self.FlashHead]
+        return [ self.cover, self.back_plate_complete, self.diffuser, self.flash_head]
 
     @cached_property
-    def coverStitch(self):
+    def cover_stitch(self):
         params = st.Params(
-            tabIndent=self.P.coverStitchTabIndent, 
-            numTabs=self.P.coverStitchNumTabs, 
-            shift=self.P.coverStitchShift,
+            tabIndent=self.P.cover_stitchTabIndent, 
+            numTabs=self.P.cover_stitchNumTabs, 
+            shift=self.P.cover_stitchShift,
             thickness=self.P.diffThickness,
-            tabHeight=self.P.coverStitchTabHeight,
+            tabHeight=self.P.cover_stitchTabHeight,
             dir=-1,
         )
 
-        u_min, u_max, v_min, v_max = self.CoverBase.ParameterRange
+        u_min, u_max, v_min, v_max = self.cover_base.ParameterRange
         u = du.lerp(u_min, u_max, self.P.coverSplitAt)
         segs = du.poly2d([ (u,v_min), (u,v_max) ])
 
-        sfc = self.CoverBase.Surface
+        sfc = self.cover_base.Surface
         [e] = [ seg.toShape(sfc) for seg in segs ]
         return st.Stitch(e, sfc, params)
 
-    def coverStitchEdge(self, side):
-        sfc = self.CoverBase.Surface
-        u_min, u_max, v_min, v_max = self.CoverBase.ParameterRange
+    def cover_stitch_edge(self, side):
+        sfc = self.cover_base.Surface
+        u_min, u_max, v_min, v_max = self.cover_base.ParameterRange
         u = du.lerp(u_min, u_max, self.P.coverSplitAt)
 
         # for left, the edge is shifted
         if side == 0:
             u_vec, _ = sfc.tangent(u, (v_min+v_max)/2)
             pts = [ 
-                sfc.parameter(sfc.value(u,v) + self.P.coverStitchMargin*u_vec) for v in du.linspace(v_min,v_max, 10)
+                sfc.parameter(sfc.value(u,v) + self.P.cover_stitchMargin*u_vec) for v in du.linspace(v_min,v_max, 10)
             ]
             seg = du.bez2d(pts)
         else:
@@ -1055,57 +1101,57 @@ class Model:
 
         return seg.toShape(sfc) 
 
-    def coverPart(self, side):
-        e = self.coverStitchEdge(side)
-        body = BOPTools.SplitAPI.slice(self.CoverBase, [e], mode="Standard", tolerance=0.01).SubShapes[side]
-        body = body.cut(self.CoverFrontSlots)
+    def cover_part(self, side):
+        e = self.cover_stitch_edge(side)
+        body = BOPTools.SplitAPI.slice(self.cover_base, [e], mode="Standard", tolerance=0.01).SubShapes[side]
+        body = body.cut(self.cover_front_slots)
 
-        stitch = self.coverStitch
+        stitch = self.cover_stitch
         if side == 0:
             body = body.cut(stitch.slots())
         else:
             body = body.fuse(stitch.tabs() + stitch.stopper_tabs())
 
         if self.P.coverConnectedByTabs:
-            stitch = self.coverBackPlateStitch(side)
+            stitch = self.cover_back_plate_stitch(side)
             body = body.fuse( stitch.tabs() + stitch.stopper_tabs() )
         else:
             body = body.fuse( self.cover_fold(side) )
 
-        body = body.fuse( self.coverFlashFlap(side))
+        body = body.fuse( self.cover_flash_flap(side))
 
         # mount hole
-        r = self.snapHoleDia / 2
+        r = self.P.snapHoleDia / 2
         f = Part.Face(Part.Wire([Part.makeCircle(r)]))
-        cyl = f.rotate(O,Y,90).translate(self.flashPoint + 20*Y + 12*Z ).extrude(100*X).translate(-50*X)
+        cyl = f.rotate(O,Y,90).translate(self.flash_point + 20*Y + 12*Z ).extrude(100*X).translate(-50*X)
         body = body.cut(cyl)
 
         return body
 
-    def backPlateStitchParams(self, side):
+    def back_plate_stitch_params(self, side):
         return st.Params(
-            tabIndent=self.P.backPlateStitchTabIndent, 
-            numTabs=self.P.backPlateStitchNumTabs, 
-            shift=self.P.backPlateStitchShift,
+            tabIndent=self.P.back_plate_stitchTabIndent, 
+            numTabs=self.P.back_plate_stitchNumTabs, 
+            shift=self.P.back_plate_stitchShift,
             thickness=self.P.diffThickness,
-            tabHeight=self.P.backPlateStitchTabHeight,
+            tabHeight=self.P.back_plate_stitchTabHeight,
             tabOverlay=0,
             dir=(1 if side == 0 else -1),
         )
 
     # back plate stitch(es)
-    def backPlateStitch(self, side):
-        p0,p1 = self.BackPlateSideLines[side]
+    def back_plate_stitch(self, side):
+        p0,p1 = self.back_plate_pts[side]
         e = Part.makeLine(p1,p0)
-        return st.Stitch(e, self.sfc_back_plate, self.backPlateStitchParams(side))
+        return st.Stitch(e, self.sfc_back_plate, self.back_plate_stitch_params(side))
 
-    def coverBackPlateStitch(self, side):
-        p0,p1 = self.BackPlateSideLines[side]
+    def cover_back_plate_stitch(self, side):
+        p0,p1 = self.back_plate_pts[side]
         e = Part.makeLine(p1,p0)
         sfc = self.sfc_back_plate
 
         p2 = p1 - (1 if side == 0 else -1) *Y 
         sfc = Part.Face(Part.makePolygon([p0,p1,p2])).Surface
 
-        return st.Stitch(e, sfc, self.backPlateStitchParams(side))
+        return st.Stitch(e, sfc, self.back_plate_stitch_params(side))
 
