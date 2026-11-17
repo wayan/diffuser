@@ -175,17 +175,23 @@ def round_corners(w, pts, r=2):
 def rounded_polygon(pts, closed=True):
     """Polygon wire through pts. A point given as (pt, r) gets a rounded corner:
     both edges are cut back by r and joined by a curve tangent to them,
-    the same curve round_corner makes. Plain points stay sharp."""
-    verts = [p if isinstance(p, tuple) else (p, 0) for p in pts]
+    the same curve round_corner makes. A point given as (pt, r_in, r_out) gets
+    an asymmetrical one: the incoming edge, from the previous point, is cut back
+    by r_in, the outgoing one by r_out. Plain points stay sharp."""
+    def vert(p):
+        if not isinstance(p, tuple):
+            return p, 0, 0
+        return (p[0], p[1], p[1]) if len(p) == 2 else p
+    verts = [vert(p) for p in pts]
     n = len(verts)
 
     corners = []    # per vertex: (where the incoming edge ends, where the outgoing edge starts, curve)
-    for i, (p, r) in enumerate(verts):
-        if r == 0 or (not closed and i in (0, n-1)):
+    for i, (p, r_in, r_out) in enumerate(verts):
+        if (r_in == 0 and r_out == 0) or (not closed and i in (0, n-1)):
             corners.append((p, p, None))
             continue
-        a = p + (verts[i-1][0] - p).normalize()*r
-        b = p + (verts[(i+1) % n][0] - p).normalize()*r
+        a = p + (verts[i-1][0] - p).normalize()*r_in
+        b = p + (verts[(i+1) % n][0] - p).normalize()*r_out
         corners.append((a, b, Part.BSplineCurve([a, p, b]).toShape()))
 
     edges = []
@@ -193,7 +199,9 @@ def rounded_polygon(pts, closed=True):
         _, start, curve = corners[i]
         if curve:
             edges.append(curve)
-        edges.append(Part.makeLine(start, corners[(i+1) % n][0]))
+        end = corners[(i+1) % n][0]
+        if (end - start).Length > 1e-7:     # none left when a corner is cut back all the way
+            edges.append(Part.makeLine(start, end))
     return Part.Wire(edges)
 
 def sub_edge(e, uns):
